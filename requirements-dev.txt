@@ -18,7 +18,7 @@ cryptography==41.0.7
 Deprecated==1.2.14
 distlib==0.3.8
 distro==1.8.0
-filelock==3.12.4
+filelock==3.13.1
 flake8==6.1.0
 freezegun==1.2.2
 humanize==4.8.0
