@@ -23,7 +23,7 @@ flake8==6.1.0
 freezegun==1.2.2
 humanize==4.8.0
 hypothesis==6.88.1
-idna==3.4
+idna==3.6
 importlib-metadata==7.0.1
 iniconfig==2.0.0
 jaraco.classes==3.3.0
