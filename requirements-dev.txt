@@ -21,7 +21,7 @@ distro==1.8.0
 filelock==3.12.4
 flake8==6.1.0
 freezegun==1.2.2
-humanize==4.8.0
+humanize==4.9.0
 hypothesis==6.88.1
 idna==3.4
 importlib-metadata==7.0.1
