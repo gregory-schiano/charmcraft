@@ -9,7 +9,7 @@ craft-providers==1.20.1
 craft-store==2.6.0
 cryptography==41.0.7
 Deprecated==1.2.14
-distro==1.8.0
+distro==1.9.0
 humanize==4.8.0
 idna==3.4
 importlib-metadata==7.0.1
