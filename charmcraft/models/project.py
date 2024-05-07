@@ -17,6 +17,7 @@
 import abc
 import datetime
 import pathlib
+import re
 from collections.abc import Iterable, Iterator
 from typing import (
     Any,
@@ -32,19 +33,12 @@ from craft_providers import bases
 from pydantic import dataclasses
 from typing_extensions import Self, TypedDict
 
-from charmcraft import const, utils
+from charmcraft import const, preprocess, utils
 from charmcraft.const import (
-    JUJU_ACTIONS_FILENAME,
-    JUJU_CONFIG_FILENAME,
-    METADATA_FILENAME,
-    METADATA_YAML_KEYS,
     BaseStr,
     BuildBaseStr,
     CharmArch,
 )
-from charmcraft.metafiles.actions import parse_actions_yaml
-from charmcraft.metafiles.config import parse_config_yaml
-from charmcraft.metafiles.metadata import parse_charm_metadata_yaml
 from charmcraft.models import charmcraft
 from charmcraft.models.charmcraft import (
     AnalysisConfig,
@@ -69,6 +63,18 @@ class BaseDict(TypedDict, total=False):
 LongFormBasesDict = TypedDict(
     "LongFormBasesDict", {"build-on": list[BaseDict], "run-on": list[BaseDict]}
 )
+
+
+class CharmcraftSummaryStr(models.SummaryStr):
+    """A brief summary of this charm or bundle. Ideally, this should fit into one line."""
+
+    # Maximum length was set to 200 characters because the 78 character maximum
+    # inherited from craft-application is too restrictive, as several hundred charms
+    # already exceed this maximum.
+    # Eventually this limit will be reduced, ideally to 78 characters, though that may
+    # never happen entirely. Reductions will only occur on major releases.
+    # https://github.com/canonical/charmcraft/issues/1598
+    max_length = 200
 
 
 class CharmPlatform(pydantic.ConstrainedStr):
@@ -113,6 +119,76 @@ class Platform(models.CraftBaseModel):
         if isinstance(value, str):
             return [value]
         return value
+
+
+class CharmLib(models.CraftBaseModel):
+    """A Charm library dependency for this charm."""
+
+    lib: str = pydantic.Field(
+        title="Library Path (e.g. my_charm.my_library)",
+        regex=r"[a-z0-9_]+\.[a-z0-9_]+",
+    )
+    version: str = pydantic.Field(
+        title="Version filter for the charm. Either an API version or a specific [api].[patch].",
+        regex=r"[0-9]+(\.[0-9]+)?",
+    )
+
+    @pydantic.validator("lib", pre=True)
+    def _validate_name(cls, value: str) -> str:
+        """Validate the lib field, providing a useful error message on failure."""
+        charm_name, _, lib_name = str(value).partition(".")
+        if not charm_name or not lib_name:
+            raise ValueError(
+                f"Library name invalid. Expected '[charm_name].[lib_name]', got {value!r}"
+            )
+        if not re.fullmatch("[a-z0-9_]+", charm_name):
+            if "-" in charm_name:
+                raise ValueError(
+                    f"Invalid charm name in lib {value!r}. Try replacing hyphens ('-') with underscores ('_')."
+                )
+            raise ValueError(
+                f"Invalid charm name for lib {value!r}. Value {charm_name!r} is invalid."
+            )
+        if not re.fullmatch("[a-z0-9_]+", lib_name):
+            raise ValueError(f"Library name {lib_name!r} is invalid.")
+        return str(value)
+
+    @pydantic.validator("version", pre=True)
+    def _validate_api_version(cls, value: str) -> str:
+        """Validate the API version field, providing a useful error message on failure."""
+        api, *_ = str(value).partition(".")
+        try:
+            int(api)
+        except ValueError:
+            raise ValueError(f"API version not valid. Expected an integer, got {api!r}") from None
+        return str(value)
+
+    @pydantic.validator("version", pre=True)
+    def _validate_patch_version(cls, value: str) -> str:
+        """Validate the optional patch version, providing a useful error message."""
+        api, separator, patch = value.partition(".")
+        if not separator:
+            return value
+        try:
+            int(patch)
+        except ValueError:
+            raise ValueError(
+                f"Patch version not valid. Expected an integer, got {patch!r}"
+            ) from None
+        return value
+
+    @property
+    def api_version(self) -> int:
+        """The API version needed for this library."""
+        return int(self.version.partition(".")[0])
+
+    @property
+    def patch_version(self) -> int | None:
+        """The patch version needed for this library, or None if no patch version is specified."""
+        api, _, patch = self.version.partition(".")
+        if not patch:
+            return None
+        return int(patch)
 
 
 @dataclasses.dataclass
@@ -360,7 +436,7 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
 
     type: Literal["charm", "bundle"]
     title: models.ProjectTitle | None
-    summary: models.SummaryStr | None
+    summary: CharmcraftSummaryStr | None
     description: str | None
 
     analysis: AnalysisConfig | None
@@ -376,6 +452,9 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
     contact: None = None
     issues: None = None
     source_code: None = None
+    charm_libs: list[CharmLib] = pydantic.Field(
+        default_factory=list, title="List of libraries to use for this charm"
+    )
 
     # These private attributes are not part of the project model but are attached here
     # because Charmcraft uses this metadata.
@@ -428,45 +507,11 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
 
         project_dir = path.parent
 
-        bundle_file = project_dir / "bundle.yaml"
-        if data.get("type") == "bundle":
-            if bundle_file.is_file():
-                with bundle_file.open() as f:
-                    data["bundle"] = safe_yaml_load(f)
-            else:
-                raise CraftError(f"Missing bundle.yaml file: {str(bundle_file)!r}")
-
-        metadata_file = project_dir / METADATA_FILENAME
-        if metadata_file.is_file():
-            # metadata.yaml exists, so we can't specify metadata keys in charmcraft.yaml.
-            overlap_keys = METADATA_YAML_KEYS.intersection(data.keys())
-            if overlap_keys:
-                raise errors.CraftValidationError(
-                    f"Cannot specify metadata keys in 'charmcraft.yaml' when "
-                    f"{METADATA_FILENAME!r} exists",
-                    details=f"Invalid keys: {sorted(overlap_keys)}",
-                    resolution=f"Migrate all keys from {METADATA_FILENAME!r} to 'charmcraft.yaml'",
-                )
-            metadata = parse_charm_metadata_yaml(project_dir, allow_basic=True)
-            data.update(metadata.dict(include={"name", "summary", "description"}))
-
-        config_file = project_dir / JUJU_CONFIG_FILENAME
-        if config_file.is_file():
-            if "config" in data:
-                raise errors.CraftValidationError(
-                    f"Cannot specify 'config' section in 'charmcraft.yaml' when {JUJU_CONFIG_FILENAME!r} exists",
-                    resolution=f"Move all data from {JUJU_CONFIG_FILENAME!r} to the 'config' section in 'charmcraft.yaml'",
-                )
-            data["config"] = parse_config_yaml(project_dir, allow_broken=True)
-
-        actions_file = project_dir / JUJU_ACTIONS_FILENAME
-        if actions_file.is_file():
-            if "actions" in data:
-                raise errors.CraftValidationError(
-                    f"Cannot specify 'actions' section in 'charmcraft.yaml' when {JUJU_ACTIONS_FILENAME!r} exists",
-                    resolution=f"Move all data from {JUJU_ACTIONS_FILENAME!r} to the 'actions' section in 'charmcraft.yaml'",
-                )
-            data["actions"] = parse_actions_yaml(project_dir).actions
+        preprocess.add_default_parts(data)
+        preprocess.add_bundle_snippet(project_dir, data)
+        preprocess.add_metadata(project_dir, data)
+        preprocess.add_config(project_dir, data)
+        preprocess.add_actions(project_dir, data)
 
         try:
             project = cls.unmarshal(data)
@@ -526,7 +571,7 @@ class BasesCharm(CharmcraftProject):
 
     type: Literal["charm"]
     name: models.ProjectName
-    summary: models.SummaryStr
+    summary: CharmcraftSummaryStr
     description: str
 
     # This is defined this way because using conlist makes mypy sad and using
@@ -592,7 +637,7 @@ class PlatformCharm(CharmcraftProject):
 
     type: Literal["charm"]
     name: models.ProjectName
-    summary: models.SummaryStr
+    summary: CharmcraftSummaryStr
     description: str
 
     base: BaseStr
@@ -652,7 +697,7 @@ class Bundle(CharmcraftProject):
     bundle: dict[str, Any] = {}
     name: models.ProjectName | None = None  # type: ignore[assignment]
     title: models.ProjectTitle | None
-    summary: models.SummaryStr | None
+    summary: CharmcraftSummaryStr | None
     description: pydantic.StrictStr | None
     charmhub: CharmhubConfig = CharmhubConfig()
 

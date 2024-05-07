@@ -1,4 +1,4 @@
-# Copyright 2023 Canonical Ltd.
+# Copyright 2023-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ MANIFEST_WITH_ATTRIBUTE = models.Manifest(
 
 
 @pytest.fixture()
-def package_service(fake_path, simple_charm, service_factory):
+def package_service(fake_path, simple_charm, service_factory, default_build_plan):
     fake_project_dir = fake_path / "project"
     fake_project_dir.mkdir(parents=True)
 
@@ -54,8 +54,7 @@ def package_service(fake_path, simple_charm, service_factory):
         # The package service doesn't call other services
         services=service_factory,
         project_dir=fake_project_dir,
-        platform="distro-1-test64",
-        build_plan=[],
+        build_plan=default_build_plan,
     )
 
 
@@ -113,8 +112,11 @@ def test_do_not_overwrite_metadata_yaml(
 ):
     fake_prime_dir = fake_path / "prime"
     fake_prime_dir.mkdir()
-    fake_metadata_yaml = fake_prime_dir / "metadata.yaml"
-    fake_metadata_yaml.touch()
+    fake_stage_dir = fake_path / "stage"
+    fake_stage_dir.mkdir()
+    fake_staged_metadata = fake_stage_dir / "metadata.yaml"
+    fake_staged_metadata.touch()
+    package_service._project.parts["reactive"] = {"source": "."}
 
     package_service.write_metadata(fake_prime_dir)
 

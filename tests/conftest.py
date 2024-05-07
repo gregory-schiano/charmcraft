@@ -1,4 +1,4 @@
-# Copyright 2020-2023 Canonical Ltd.
+# Copyright 2020-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,15 +26,15 @@ from unittest import mock
 from unittest.mock import Mock
 
 import craft_parts
-import craft_store
 import pytest
 import responses as responses_module
 import yaml
+from craft_application import models
 from craft_parts import callbacks, plugins
-from craft_providers import Executor, Provider
+from craft_providers import Executor, Provider, bases
 
 import charmcraft.parts
-from charmcraft import const, deprecations, instrum, parts, services
+from charmcraft import const, deprecations, instrum, parts, services, store, utils
 from charmcraft.application.main import APP_METADATA
 from charmcraft.bases import get_host_as_base
 from charmcraft.models import charmcraft as config_module
@@ -66,9 +66,22 @@ def service_factory(
 
     factory.project = simple_charm
 
-    factory.store.client = mock.Mock(spec_set=craft_store.StoreClient)
+    factory.store.client = mock.Mock(spec_set=store.Client)
 
     return factory
+
+
+@pytest.fixture()
+def default_build_plan():
+    arch = utils.get_host_architecture()
+    return [
+        models.BuildInfo(
+            base=bases.BaseName("ubuntu", "22.04"),
+            build_on=arch,
+            build_for=arch,
+            platform="distro-1-test64",
+        )
+    ]
 
 
 @pytest.fixture()
@@ -272,17 +285,34 @@ def prepare_charmcraft_yaml(tmp_path: pathlib.Path):
     If content is not given, remove charmcraft.yaml if exists.
     """
 
+    charmcraft_yaml_path = tmp_path / const.CHARMCRAFT_FILENAME
+
     def prepare_charmcraft_yaml(content: str | None = None):
         if content is None:
             with contextlib.suppress(OSError):
-                os.remove(tmp_path / const.CHARMCRAFT_FILENAME)
+                charmcraft_yaml_path.unlink(missing_ok=True)
         else:
-            charmcraft_yaml_file = tmp_path / const.CHARMCRAFT_FILENAME
-            charmcraft_yaml_file.write_text(content)
+            charmcraft_yaml_path.write_text(content)
 
         return tmp_path
 
     return prepare_charmcraft_yaml
+
+
+def prepare_file(tmp_path: pathlib.Path, filename: str):
+    """Helper to create a file under a temporary path."""
+
+    path = tmp_path / filename
+
+    def prepare(content: str | None = None):
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(content)
+
+        return tmp_path
+
+    return prepare
 
 
 @pytest.fixture()
@@ -291,18 +321,7 @@ def prepare_metadata_yaml(tmp_path: pathlib.Path):
 
     If content is not given, remove metadata.yaml if exists.
     """
-
-    def prepare_metadata_yaml(content: str | None = None, remove: bool = False):
-        if content is None:
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path / const.METADATA_FILENAME)
-        else:
-            metadata_yaml_file = tmp_path / const.METADATA_FILENAME
-            metadata_yaml_file.write_text(content)
-
-        return tmp_path
-
-    return prepare_metadata_yaml
+    return prepare_file(tmp_path, const.METADATA_FILENAME)
 
 
 @pytest.fixture()
@@ -311,18 +330,7 @@ def prepare_actions_yaml(tmp_path: pathlib.Path):
 
     If content is not given, remove actions.yaml if exists.
     """
-
-    def prepare_actions_yaml(content: str | None = None):
-        if content is None:
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path / const.JUJU_ACTIONS_FILENAME)
-        else:
-            actions_yaml_file = tmp_path / const.JUJU_ACTIONS_FILENAME
-            actions_yaml_file.write_text(content)
-
-        return tmp_path
-
-    return prepare_actions_yaml
+    return prepare_file(tmp_path, const.JUJU_ACTIONS_FILENAME)
 
 
 @pytest.fixture()
@@ -331,18 +339,7 @@ def prepare_config_yaml(tmp_path: pathlib.Path):
 
     If content is not given, remove config.yaml if exists.
     """
-
-    def prepare_config_yaml(content: str | None = None):
-        if content is None:
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path / const.JUJU_CONFIG_FILENAME)
-        else:
-            config_yaml_file = tmp_path / const.JUJU_CONFIG_FILENAME
-            config_yaml_file.write_text(content)
-
-        return tmp_path
-
-    return prepare_config_yaml
+    return prepare_file(tmp_path, const.JUJU_CONFIG_FILENAME)
 
 
 @pytest.fixture()

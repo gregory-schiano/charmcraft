@@ -1,4 +1,4 @@
-# Copyright 2023 Canonical Ltd.
+# Copyright 2023-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,17 +22,16 @@ import sys
 from typing import Any
 
 import craft_cli
-from craft_application import Application, AppMetadata, util
+from craft_application import Application, AppMetadata
 from craft_parts.plugins import plugins
 from overrides import override
 
-from charmcraft import const, errors, extensions, models, services
+from charmcraft import errors, extensions, models, preprocess, services
 from charmcraft.application import commands
 from charmcraft.main import GENERAL_SUMMARY
 from charmcraft.main import main as old_main
 from charmcraft.parts import BundlePlugin, CharmPlugin, ReactivePlugin
 from charmcraft.services import CharmcraftServiceFactory
-from charmcraft.utils import humanize_list
 
 APP_METADATA = AppMetadata(
     name="charmcraft",
@@ -63,50 +62,43 @@ class Charmcraft(Application):
         """Return a dict with project-specific variables, for a craft_part.ProjectInfo."""
         return {"version": "unversioned"}
 
+    def _check_deprecated(self, yaml_data: dict[str, Any]) -> None:
+        """Check for deprecated fields in the yaml_data."""
+        if "parts" in yaml_data:
+            for k, v in yaml_data["parts"].items():
+                if (k in ("charm", "reactive", "bundle")) or (
+                    v.get("plugin", None) in ("charm", "reactive", "bundle")
+                ):
+                    if "prime" in v:
+                        craft_cli.emit.progress(
+                            "Warning: use of 'prime' in a charm part "
+                            "is deprecated and no longer works, "
+                            "see https://juju.is/docs/sdk/include-extra-files-in-a-charm",
+                            permanent=True,
+                        )
+
     def _extra_yaml_transform(
         self, yaml_data: dict[str, Any], *, build_on: str, build_for: str | None
     ) -> dict[str, Any]:
-        yaml_data = yaml_data.copy()
+        self._check_deprecated(yaml_data)
 
-        # Default extensions
-        if yaml_data.get("type") == "bundle":
-            yaml_data.setdefault("extensions", []).append("bundle")
+        # Extensions get applied on as close as possible to what the user provided.
+        yaml_data = extensions.apply_extensions(self.project_dir, yaml_data.copy())
 
-        yaml_data = extensions.apply_extensions(self.project_dir, yaml_data)
-
-        metadata_path = pathlib.Path(self.project_dir / "metadata.yaml")
-        if metadata_path.exists():
-            with metadata_path.open() as file:
-                metadata_yaml = util.safe_yaml_load(file)
-            if not isinstance(metadata_yaml, dict):
-                raise errors.CraftError(
-                    "Invalid file: 'metadata.yaml'",
-                    resolution="Ensure metadata.yaml meets the juju metadata.yaml specification.",
-                    docs_url="https://juju.is/docs/sdk/metadata-yaml",
-                    retcode=65,  # Data error, per sysexits.h
-                )
-            duplicate_fields = []
-            for field in const.METADATA_YAML_MIGRATE_FIELDS:
-                if field in yaml_data and field in metadata_yaml:
-                    duplicate_fields.append(field)
-            if duplicate_fields:
-                raise errors.CraftError(
-                    "Fields in charmcraft.yaml cannot be duplicated in metadata.yaml",
-                    details=f"Duplicate fields: {humanize_list(duplicate_fields, 'and')}",
-                    resolution="Remove the duplicate fields from metadata.yaml.",
-                    retcode=65,  # Data error. per sysexits.h
-                )
-            for field in const.METADATA_YAML_MIGRATE_FIELDS:
-                yaml_data.setdefault(field, metadata_yaml.get(field))
+        # Preprocessing "magic" to create a fully-formed charm.
+        preprocess.add_default_parts(yaml_data)
+        preprocess.add_bundle_snippet(self.project_dir, yaml_data)
+        preprocess.add_config(self.project_dir, yaml_data)
+        preprocess.add_actions(self.project_dir, yaml_data)
+        preprocess.add_metadata(self.project_dir, yaml_data)
 
         return yaml_data
 
-    def _configure_services(self, platform: str | None, build_for: str | None) -> None:
-        super()._configure_services(platform, build_for)
+    def _configure_services(self, provider_name: str | None) -> None:
+        super()._configure_services(provider_name)
         self.services.set_kwargs(
             "package",
             project_dir=self.project_dir,
-            platform=platform,
             build_plan=self._build_plan,
         )
 

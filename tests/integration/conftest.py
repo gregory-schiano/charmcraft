@@ -31,10 +31,10 @@ def service_factory():
 
 
 @pytest.fixture()
-def app(monkeypatch, service_factory):
+def app(monkeypatch, new_path, service_factory):
     monkeypatch.setenv("CRAFT_DEBUG", "1")
     app = application.Charmcraft(app=application.APP_METADATA, services=service_factory)
-    app._configure_services(None, None)
+    app._configure_services(None)
     commands.fill_command_groups(app)
 
     return app

@@ -330,9 +330,7 @@ def test_bundle_missing_name_in_bundle(tmp_path, bundle_yaml, bundle_config):
         PackCommand(bundle_config).run(noargs)
     assert str(cm.value) == (
         "Invalid bundle config; "
-        "missing a 'name' field indicating the bundle's name in file '{}'.".format(
-            tmp_path / const.BUNDLE_FILENAME
-        )
+        f"missing a 'name' field indicating the bundle's name in file '{tmp_path / const.BUNDLE_FILENAME}'."
     )
 
 
@@ -843,7 +841,7 @@ def test_prime_extra_globstar(tmp_path, bundle_yaml, bundle_config):
         ("libs/fs.txt", False),
     )
 
-    for srcpath, expected in srcpaths:
+    for srcpath, _ in srcpaths:
         testfile = tmp_path / pathlib.Path(srcpath)
         testfile.parent.mkdir(parents=True, exist_ok=True)
         testfile.touch()
@@ -875,7 +873,7 @@ def test_prime_extra_globstar_specific_files(tmp_path, bundle_yaml, bundle_confi
         ("libs/fs.nop", False),
     )
 
-    for srcpath, expected in srcpaths:
+    for srcpath, _ in srcpaths:
         testfile = tmp_path / pathlib.Path(srcpath)
         testfile.parent.mkdir(parents=True, exist_ok=True)
         testfile.touch()
