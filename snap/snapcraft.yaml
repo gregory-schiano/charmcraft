@@ -1,4 +1,4 @@
-# Copyright 2020-2023 Canonical Ltd.
+# Copyright 2020-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ apps:
   charmcraft:
     # run Python in unbuffered mode
     command: bin/python3 -u $SNAP/bin/charmcraft
-    completer: completion.bash
+    completer: completion.sh
     environment:
       # have the cache outside of the version dirs (avoids keeping N copies)
       XDG_CACHE_HOME: $SNAP_USER_COMMON/cache
@@ -65,11 +65,12 @@ apps:
       XDG_CONFIG_HOME: $SNAP_USER_COMMON/config
       CRYPTOGRAPHY_OPENSSL_NO_LEGACY: "true"
 
+  spread:
+    command: bin/spread
+
 confinement: classic
 
 build-packages:
-  - cargo
-  - rustc
   - pkg-config
   - python3.10-dev
   - libpython3.10-dev
@@ -85,6 +86,9 @@ build-packages:
   - libxml2-dev
   - libxslt1-dev
   - libyaml-dev
+build-snaps:
+  - rustup
+  - astral-uv
 
 
 parts:
@@ -119,10 +123,7 @@ parts:
   charmcraft:
     after: [charmcraft-libs, libgit2]
     source: .
-    plugin: python
-    python-requirements:
-      - requirements-jammy.txt
-      - requirements.txt
+    plugin: nil
     build-environment:
       # CFLAGS for Python 3.10 and libyaml. Allows cryptography and pyyaml to find
       # the appropriate system libraries.
@@ -131,23 +132,104 @@ parts:
       # https://github.com/canonical/charmcraft/issues/1369
       - PIP_NO_BINARY: ":all:"
       - CRYPTOGRAPHY_OPENSSL_NO_LEGACY: "true"
+      - UV_FROZEN: "true"
+      - MAKEOPTS: -j$(nproc --all)
+      - UV_PYTHON_DOWNLOADS: never
+      - UV_COMPILE_BYTECODE: "true"
+      - CLICOLOR_FORCE: "true"
+      - UV_PROJECT_ENVIRONMENT: $CRAFT_PART_INSTALL
     build-attributes:
       - enable-patchelf
     override-pull: |
-      craftctl default
+      # Need the full path for craftctl because we stage our own craftctl to the path.
+      /snap/snapcraft/current/libexec/snapcraft/craftctl default
       # Ensure we don't have a dubious ownership error from git with a remote build.
       git config --global --add safe.directory $CRAFT_PART_SRC
-      # set the version
-      version="$(python3 setup.py --version)"
-      craftctl set version="${version}"
-      [ -n "$(echo $version | grep "post")" ] && grade=devel || grade=stable
-      craftctl set grade="${grade}"
+      # Set up the rust compiler
+      rustup default 1.79
     override-build: |
-      craftctl default
-      cp -v completion.bash ../install
-      sed -i -e '1 s|^#!/.*|#!/snap/charmcraft/current/bin/python -E|' $CRAFT_PART_INSTALL/bin/craftctl
+      uv venv --relocatable $CRAFT_PART_INSTALL
+      uv sync --no-dev --no-editable --no-binary
+      . $CRAFT_PART_INSTALL/bin/activate
+      uv pip install -r requirements-jammy.txt
+      rm -f $CRAFT_PART_INSTALL/lib64
+
+      mkdir -p $CRAFT_PART_INSTALL/libexec/charmcraft
+      sed -i 's|#!/bin/sh|#!/snap/charmcraft/current/bin/python3|' $CRAFT_PART_INSTALL/bin/craftctl
+
+      version="$(uv pip show charmcraft | grep "Version:" | cut -d' ' -f2)"
+      /snap/snapcraft/current/libexec/snapcraft/craftctl set version="${version}"
+      [ -n "$(echo $version | grep "post")" ] && grade=devel || grade=stable
+      /snap/snapcraft/current/libexec/snapcraft/craftctl set grade="${grade}"
+
+      rm $CRAFT_PART_INSTALL/bin/python*
+      ln -s ../usr/bin/python3 $CRAFT_PART_INSTALL/bin/python3
+      ln -s python3 $CRAFT_PART_INSTALL/bin/python
+    stage:
+      - -bin/activate*
+      - -bin/chardetect
+      - -bin/craft-providers
+      - -bin/distro
+      - -bin/jsonschema
+      - -bin/deactivate*
+      - -bin/keyring
+      - -bin/normalizer
+      - -bin/pip*
+      - -bin/pydoc*
+      - -bin/snap-helpers
+      - -bin/tabulate
     organize:
       bin/craftctl: libexec/charmcraft/craftctl
+
+  bash-completion:
+    after: [charmcraft]
+    plugin: nil
+    build-environment:
+      - LD_LIBRARY_PATH: $CRAFT_STAGE/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR
+      - PYTHONPATH: $CRAFT_STAGE/lib/python3.10/site-packages
+    override-build: |
+      python3 -m craft_cli.completion $CRAFT_PROJECT_NAME charmcraft.application:get_app_info \
+        > $CRAFT_PART_INSTALL/completion.sh
+
+  skopeo:
+    plugin: nil
+    source: https://github.com/containers/skopeo.git
+    source-tag: v1.17.0
+    build-environment:
+      - DISABLE_DOCS: "1"
+      - CGO_ENABLED: "1"
+    override-build: |
+      CGO=1 go build -ldflags -linkmode=external ./cmd/skopeo
+      mkdir "$CRAFT_PART_INSTALL"/bin
+      install -m755 skopeo "$CRAFT_PART_INSTALL"/bin/skopeo
+    stage-packages:
+      - libgpgme11
+      - libassuan0
+      - libbtrfs0
+      - libdevmapper1.02.1
+    build-attributes:
+      - enable-patchelf
+    build-snaps:
+      - go/1.21/stable
+    build-packages:
+      - libgpgme-dev
+      - libassuan-dev
+      - libbtrfs-dev
+      - libdevmapper-dev
+      - pkg-config
+    organize:
+      bin/skopeo: libexec/charmcraft/skopeo
+
+  spread:
+    plugin: go
+    source: https://github.com/snapcore/spread.git
+    source-depth: 1
+    build-packages:
+      - golang-go
+    build-environment:
+      - CGO_ENABLED: "0"
+    stage:
+      - -bin/humbox
 
 hooks:
   configure:

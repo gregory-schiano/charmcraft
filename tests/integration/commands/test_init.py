@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Tests for init command."""
+
 import argparse
 import contextlib
 import os
@@ -24,13 +25,12 @@ import subprocess
 import sys
 from unittest import mock
 
-import pydocstyle
 import pytest
 import pytest_check
 
 import charmcraft
 from charmcraft import errors
-from charmcraft.application import commands
+from charmcraft.application.commands import init
 from charmcraft.utils import S_IXALL
 
 with contextlib.suppress(ImportError):
@@ -68,9 +68,11 @@ VALID_AUTHORS = [
 ]
 
 
-@pytest.fixture()
+@pytest.fixture
 def init_command():
-    return commands.InitCommand({"app": charmcraft.application.APP_METADATA, "services": None})
+    return init.InitCommand(
+        {"app": charmcraft.application.APP_METADATA, "services": None}
+    )
 
 
 def create_namespace(
@@ -78,7 +80,7 @@ def create_namespace(
     name="my-charm",
     author="J Doe",
     force=False,
-    profile=commands.init.DEFAULT_PROFILE,
+    profile=init.DEFAULT_PROFILE,
     project_dir: pathlib.Path | None = None,
 ):
     """Helper to create a valid namespace."""
@@ -94,25 +96,44 @@ def create_namespace(
 
 
 @pytest.mark.parametrize(
-    ("profile", "expected_files"),
+    ("profile", "base_expected_files", "has_workload_module"),
     [
-        pytest.param("simple", BASIC_INIT_FILES, id="simple"),
-        pytest.param("machine", BASIC_INIT_FILES, id="machine"),
-        pytest.param("kubernetes", BASIC_INIT_FILES, id="kubernetes"),
+        pytest.param("simple", BASIC_INIT_FILES, False, id="simple"),
+        pytest.param("machine", BASIC_INIT_FILES, True, id="machine"),
+        pytest.param("kubernetes", BASIC_INIT_FILES, True, id="kubernetes"),
     ],
 )
-@pytest.mark.parametrize("charm_name", ["my-charm", "charm123"])
+@pytest.mark.parametrize(
+    ("charm_name", "workload_module_filename"),
+    [
+        pytest.param("machine", "workload.py", id="generic_name"),
+        pytest.param(
+            "foo-bar-k8s-operator", "foo_bar.py", id="generic_suffix_k8s_operator"
+        ),
+        pytest.param("foo-bar-k8s", "foo_bar.py", id="generic_suffix_k8s"),
+        pytest.param("foo-bar-operator", "foo_bar.py", id="generic_suffix_operator"),
+        pytest.param("charm123", "charm123.py", id="name_with_numbers"),
+    ],
+)
 @pytest.mark.parametrize("author", VALID_AUTHORS)
 def test_files_created_correct(
     new_path,
     init_command,
     profile: str,
-    expected_files: set[pathlib.Path],
+    base_expected_files: set[pathlib.Path],
+    has_workload_module: bool,
     charm_name,
+    workload_module_filename: str,
     author,
 ):
     params = create_namespace(name=charm_name, author=author, profile=profile)
     init_command.run(params)
+
+    if has_workload_module:
+        workload_module_path = pathlib.Path(f"src/{workload_module_filename}")
+        expected_files = base_expected_files.union({workload_module_path})
+    else:
+        expected_files = base_expected_files
 
     actual_files = {p.relative_to(new_path) for p in new_path.rglob("*")}
 
@@ -121,7 +142,9 @@ def test_files_created_correct(
     tox_ini = (new_path / "tox.ini").read_text(encoding="utf-8")
 
     pytest_check.equal(actual_files, expected_files)
-    pytest_check.is_true(re.search(rf"^name: {charm_name}$", charmcraft_yaml, re.MULTILINE))
+    pytest_check.is_true(
+        re.search(rf"^name: {charm_name}$", charmcraft_yaml, re.MULTILINE)
+    )
     pytest_check.is_true(re.search(rf"^# Copyright \d+ {author}", tox_ini))
 
 
@@ -177,7 +200,9 @@ def test_gecos_valid_author(monkeypatch, new_path, init_command, author):
         ),
     ],
 )
-def test_gecos_user_not_found(monkeypatch, new_path, init_command, mock_getpwuid, error_msg):
+def test_gecos_user_not_found(
+    monkeypatch, new_path, init_command, mock_getpwuid, error_msg
+):
     monkeypatch.setattr(pwd, "getpwuid", mock_getpwuid)
 
     with pytest.raises(errors.CraftError, match=error_msg):
@@ -230,10 +255,13 @@ def test_executable_set(new_path, init_command):
         assert path.stat().st_mode & S_IXALL == S_IXALL
 
 
-@pytest.mark.slow()
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform == "win32", reason="does not run on windows")
-@pytest.mark.skipif(bool(os.getenv("RUNNING_TOX")), reason="does not work inside tox")
-@pytest.mark.parametrize("profile", list(commands.init.PROFILES))
+@pytest.mark.skipif(
+    bool(os.getenv("RUNNING_TOX")) and sys.version_info < (3, 11),
+    reason="does not work inside tox in Python3.10 and below",
+)
+@pytest.mark.parametrize("profile", list(init.PROFILES))
 def test_tox_success(new_path, init_command, profile):
     # fix the PYTHONPATH and PATH so the tests in the initted environment use our own
     # virtualenv libs and bins (if any), as they need them, but we're not creating a
@@ -254,34 +282,14 @@ def test_tox_success(new_path, init_command, profile):
     if not (new_path / "tox.ini").exists():
         pytest.skip("init template doesn't contain tox.ini file")
 
-    result = subprocess.run(
-        ["tox", "-v"],
-        cwd=new_path,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    assert result.returncode == 0, "Tox run failed:\n" + result.stdout
-
-
-@pytest.mark.parametrize("profile", list(commands.init.PROFILES))
-def test_pep257(new_path, init_command, profile):
-    to_ignore = {
-        "D105",  # Missing docstring in magic method
-        "D107",  # Missing docstring in __init__
-    }
-    to_include = pydocstyle.violations.conventions.pep257 - to_ignore
-
-    init_command.run(create_namespace(profile=profile))
-
-    python_paths = (str(path) for path in new_path.rglob("*.py"))
-    python_paths = (path for path in python_paths if "tests" not in path)
-    errors = list(pydocstyle.check(python_paths, select=to_include))
-
-    if errors:
-        report = [f"Please fix files as suggested by pydocstyle ({len(errors):d} issues):"]
-        report.extend(str(e) for e in errors)
-        msg = "\n".join(report)
-        pytest.fail(msg, pytrace=False)
+    if list((new_path / "tests").glob("*.py")):  # If any tests exist
+        result = subprocess.run(
+            ["tox", "-v", "run", "-e", "unit"],
+            cwd=new_path,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        assert result.returncode == 0, "Tox run failed:\n" + result.stdout

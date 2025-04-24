@@ -34,7 +34,7 @@ class _Measurements:
         # ancestors list when a measure starts (last item is direct parent); the
         # first value is special, None, to reflect the "root", the rest are
         # measurement ids
-        self.parents = [None]  # start with a unique "root"
+        self.parents: list[None | str] = [None]  # start with a unique "root"
 
         # simple dict to hold measurements information; the key is the measurement
         # id and each value holds all it info
@@ -104,12 +104,12 @@ class Timer:
     It can work as a context manager that generates a measurement of the block of code inside
     its context, or as a decorator to get the timing of the whole decorated function.
 
-    Usage as a context manager:
+    Usage as a context manager::
 
         with timer("some message", more="stuff", answer=42):
             ...
 
-    Usage as a decorator:
+    Usage as a decorator::
 
         @timer("some message", foo="bar")
         def foo(...):
@@ -118,7 +118,7 @@ class Timer:
     In both cases the message is mandatory and the extra info optional.
 
     Also this class provides a `mark` method to sub-divide the context manager code
-    block. How to use it:
+    block. How to use it::
 
         with timer("some message") as cm:
             ...

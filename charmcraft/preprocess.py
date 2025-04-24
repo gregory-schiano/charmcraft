@@ -18,6 +18,7 @@
 These functions are called from the Application class's `_extra_yaml_transform`
 to do pre-processing on a charmcraft.yaml file before applying extensions.
 """
+
 import pathlib
 from typing import Any
 
@@ -32,7 +33,7 @@ def add_default_parts(yaml_data: dict[str, Any]) -> None:
     :param yaml_data: The raw YAML dictionary of the project.
     :returns: The same dictionary passed in, with necessary mutations.
     """
-    if "parts" in yaml_data:  # Only operate if there isn't a parts key
+    if yaml_data.get("parts"):  # Only operate if there aren't any parts.
         return
 
     if yaml_data.get("type") == "bundle":

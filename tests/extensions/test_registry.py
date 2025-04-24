@@ -55,7 +55,7 @@ class FakeExtension3(Extension):
     name = "fake-extension-3"
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_extensions(stub_extensions):
     fakes = [FakeExtension1, FakeExtension2]
     for ext_class in fakes:
@@ -85,7 +85,11 @@ def test_get_extension_class_error(fake_extensions):
 
 def test_get_extensions(fake_extensions):
     assert extensions.get_extensions() == [
-        {"name": "fake-extension-1", "bases": [("ubuntu@22.04")], "experimental_bases": []},
+        {
+            "name": "fake-extension-1",
+            "bases": [("ubuntu@22.04")],
+            "experimental_bases": [],
+        },
         {
             "name": "fake-extension-2",
             "bases": [("ubuntu@22.04")],

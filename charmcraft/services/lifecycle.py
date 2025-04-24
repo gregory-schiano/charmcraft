@@ -14,9 +14,17 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Service class for running craft lifecycle commands."""
+
 from __future__ import annotations
 
-from craft_application import services
+from typing import cast
+
+import craft_parts
+from craft_application import services, util
+from craft_cli import emit
+from overrides import override
+
+from charmcraft import dispatch
 
 
 class LifecycleService(services.LifecycleService):
@@ -26,3 +34,40 @@ class LifecycleService(services.LifecycleService):
         """Do Charmcraft-specific setup work."""
         self._manager_kwargs.setdefault("project_name", self._project.name)
         super().setup()
+
+    @override
+    def _get_build_for(self) -> str:
+        build_for = super()._get_build_for()
+        if "-" not in build_for:
+            if self._build_plan and self._build_plan[0].build_for == "all":
+                emit.progress(
+                    "WARNING: Charmcraft does not validate that charms with "
+                    "architecture 'all' are fully architecture agnostic.",
+                    permanent=True,
+                )
+            return build_for
+
+        # Multi-arch builds: Tell craft-parts that we're building for any foreign
+        # architecture (to trick it into trying to cross-compile anything, leading
+        # to more likely failures.)
+        emit.progress(
+            "WARNING: Charmcraft does not validate that charms with multiple "
+            "given architectures are architecture agnostic.",
+            permanent=True,
+        )
+        host_arch = util.get_host_architecture()
+        for arch in build_for.split("-"):
+            if arch != host_arch:
+                return arch
+
+        return host_arch
+
+    @override
+    def post_prime(self, step_info: craft_parts.StepInfo) -> bool:
+        return_value = super().post_prime(step_info)
+
+        project_info = cast(craft_parts.ProjectInfo, step_info.project_info)
+        # TODO: include an entrypoint override. #1896
+        return return_value | dispatch.create_dispatch(
+            prime_dir=project_info.dirs.prime_dir
+        )

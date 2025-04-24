@@ -5,7 +5,8 @@ environment:
   PROJECT_PATH: /charmcraft
   SNAPD_TESTING_TOOLS: $PROJECT_PATH/tools/external/tools
   PATH: /snap/bin:$PATH:$SNAPD_TESTING_TOOLS
-  CRAFT_DEBUG: 1  # Show exception tracebacks.
+  CRAFT_DEBUG: 1 # Show exception tracebacks.
+  CRAFT_VERBOSITY_LEVEL: debug # Show debugging output when failing.
   # Use the staging store for tests:
   CHARMCRAFT_STORE_API_URL: https://api.staging.charmhub.io
   CHARMCRAFT_UPLOAD_URL: https://storage.staging.snapcraftcontent.com
@@ -22,7 +23,7 @@ backends:
   google:
     key: '$(HOST: echo "$SPREAD_GOOGLE_KEY")'
     location: snapd-spread/us-east1-b
-    halt-timeout: 2h
+    halt-timeout: 3h
     systems:
       - ubuntu-18.04-64:
           workers: 1
@@ -32,6 +33,7 @@ backends:
           storage: 40G
       - ubuntu-22.04-64:
           workers: 6
+          memory: 8G
           storage: 40G
 
   multipass:
@@ -51,7 +53,7 @@ backends:
       system=$(echo "${SPREAD_SYSTEM}" | tr . -)
       instance_name="spread-${SPREAD_BACKEND}-${instance_num}-${system}"
 
-      multipass launch --cpus 2 --disk 20G --memory 2G --name "${instance_name}" "${multipass_image}"
+      multipass launch --cpus 4 --disk 40G --memory 8G --name "${instance_name}" "${multipass_image}"
 
       # Enable PasswordAuthentication for root over SSH.
       multipass exec "$instance_name" -- \
@@ -80,6 +82,8 @@ backends:
       - ubuntu-20.04-64:
           workers: 1
       - ubuntu-22.04-64:
+          workers: 4
+      - ubuntu-24.04-64:
           workers: 4
 prepare: |
   set -e
@@ -128,6 +132,40 @@ prepare: |
   install_charmcraft
 
 suites:
+  docs/howto/code/:
+    summary: tests howto from the docs
+    systems:
+      - ubuntu-22.04-64
+    manual: true
+    prepare: |
+      juju_channel=3.5/stable
+      microk8s_channel=1.31-strict/stable
+
+      mkdir -p ~/.local/share  # Workaround for Juju not being able to create the directory
+
+      #shellcheck source=tests/spread/tools/prepare.sh
+      . "/charmcraft/tests/spread/tools/prepare.sh"
+
+      refresh_or_install_snap juju "$juju_channel"
+      refresh_or_install_snap microk8s "$microk8s_channel"
+      refresh_or_install_snap rockcraft latest/stable --classic
+  docs/tutorial/code/:
+    summary: tests tutorial from the docs
+    systems:
+      - ubuntu-22.04-64
+    manual: true
+    prepare: |
+      juju_channel=3.6/stable
+      microk8s_channel=1.31-strict/stable
+
+      mkdir -p ~/.local/share  # Workaround for Juju not being able to create the directory
+
+      #shellcheck source=tests/spread/tools/prepare.sh
+      . "/charmcraft/tests/spread/tools/prepare.sh"
+
+      refresh_or_install_snap juju "$juju_channel"
+      refresh_or_install_snap microk8s "$microk8s_channel"
+      refresh_or_install_snap rockcraft latest/stable --classic
   tests/spread/commands/:
     summary: simple charmcraft commands
   tests/spread/charms/:
@@ -162,6 +200,8 @@ suites:
     summary: test charm dependencies
     systems:
       - ubuntu-22.04-64
+    kill-timeout: 60m # Setting up Juju can take a while.
+    priority: 50 # Because setting up Juju takes a while, do these first.
     prepare: |
       snap install juju --channel=3.2/stable
       # Set up Juju controllers for the charms
@@ -199,12 +239,9 @@ suites:
       # https://github.com/canonical/lxd-cloud/blob/f20a64a8af42485440dcbfd370faf14137d2f349/test/includes/lxd.sh#L13-L23
       iptables -P FORWARD ACCEPT
 
-      # Ensure that the reused charms and bundles are registered if necessary.
+      # Ensure that the reused charms are registered if necessary.
       if ! charmcraft status "${CHARM_DEFAULT_NAME}"; then
-        charmcraft register $CHARM_DEFAULT_NAME || ERROR Charm $CHARM_DEFAULT_NAME cannot be registered to this account.
-      fi
-      if ! charmcraft status $BUNDLE_DEFAULT_NAME; then
-        charmcraft register-bundle $BUNDLE_DEFAULT_NAME || ERROR Charm $BUNDLE_DEFAULT_NAME cannot be registered to this account.
+        charmcraft register $CHARM_DEFAULT_NAME
       fi
 
       rm -f charmcraft.yaml
@@ -223,6 +260,7 @@ suites:
       # should be part of the environment (when running spread locally just define it,
       # for GH actions set it in Settings -> Security -> Actions -> Repository secrets)
       CHARMCRAFT_AUTH: "$(HOST: echo $CHARMCRAFT_AUTH)"
+      CHARMCRAFT_SINGLE_CHARM_AUTH: "$(HOST: echo $CHARMCRAFT_SINGLE_CHARM_AUTH)"
 
       # to not flood Charmhub with names the same two are always used in the Store related
       # tests (except in the names registration tests, of course); register them manually

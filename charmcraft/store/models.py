@@ -15,6 +15,7 @@
 # For further info, check https://github.com/canonical/charmcraft
 """Internal models for store data structiues."""
 
+import contextlib
 import dataclasses
 import datetime
 import enum
@@ -125,7 +126,7 @@ class Revision:
     created_at: datetime.datetime
     status: str
     errors: list[Error]
-    bases: list[Base]
+    bases: list[Base | None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,7 +153,7 @@ class Release:
     channel: str
     expires_at: datetime.datetime
     resources: list[Resource]
-    base: Base
+    base: Base | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,6 +283,20 @@ class ChannelData:
         risk = self.risk.name.lower()
         return "/".join(i for i in (self.track, risk, self.branch) if i is not None)
 
+    def __eq__(self, other: object, /) -> bool:
+        if isinstance(other, ChannelData):
+            return (
+                self.track == other.track
+                and self.risk == other.risk
+                and self.branch == other.branch
+            )
+
+        if isinstance(other, str):
+            with contextlib.suppress(CraftError):
+                return self == ChannelData.from_str(other)
+
+        return NotImplemented
+
 
 LibraryMetadataRequest = TypedDict(
     "LibraryMetadataRequest",
@@ -292,3 +307,4 @@ LibraryMetadataRequest = TypedDict(
         "patch": NotRequired[int],
     },
 )
+LibraryMetadataIdRequest = TypedDict("LibraryMetadataIdRequest", {"library-id": str})

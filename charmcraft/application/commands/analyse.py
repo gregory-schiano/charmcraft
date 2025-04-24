@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Command for analysing a charm."""
+
 import argparse
 import json
 import pathlib
@@ -69,13 +70,13 @@ class Analyse(base.CharmcraftCommand):
             return self._run_formatted(parsed_args.filepath, ignore=ignore)
         return self._run_streaming(parsed_args.filepath, ignore=ignore)
 
-    def _run_formatted(self, filepath: pathlib.Path, *, ignore=Container[str]) -> int:
+    def _run_formatted(self, filepath: pathlib.Path, *, ignore: Container[str]) -> int:
         """Run the command, formatting the output into JSON or similar at the end."""
         results = list(self._services.analysis.lint_file(filepath))
         emit.message(json.dumps(results, indent=4, default=pydantic_encoder))
         return max(r.level for r in results).return_code
 
-    def _run_streaming(self, filepath: pathlib.Path, *, ignore=Container[str]) -> int:
+    def _run_streaming(self, filepath: pathlib.Path, *, ignore: Container[str]) -> int:
         """Run the command, printing linter results as we get them."""
         max_level = lint.ResultLevel.OK
         with emit.progress_bar(
@@ -85,8 +86,7 @@ class Analyse(base.CharmcraftCommand):
                 filepath, ignore=ignore, include_ignored=False
             ):
                 emit.progress(str(result), permanent=True)
-                if result.level > max_level:
-                    max_level = result.level
+                max_level = max(result.level, max_level)
                 progress.advance(1)
 
         return max_level.return_code

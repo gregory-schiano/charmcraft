@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Utilities related to Python packages."""
+
 import pathlib
 import re
 import string
@@ -103,10 +104,6 @@ def get_pip_command(
     binary_packages = get_pypi_packages(binary_deps)
     requirements_packages = get_requirements_file_package_names(*requirements_files)
     all_packages = charm_packages | binary_packages | requirements_packages
-    source_only_packages = sorted(
-        get_package_names(all_packages) - get_package_names(binary_packages)
-    )
-
     non_requirements_packages = sorted(
         exclude_packages(
             set(source_deps) | set(binary_deps),
@@ -114,10 +111,22 @@ def get_pip_command(
         )
     )
 
-    if source_only_packages:
-        no_binary = [f"--no-binary={','.join(source_only_packages)}"]
-    else:
-        no_binary = []
+    if not binary_packages:
+        return [
+            *prefix,
+            "--no-binary=:all:",
+            *(f"--requirement={path}" for path in requirements_files),
+            *non_requirements_packages,
+        ]
+
+    source_only_packages = sorted(
+        get_package_names(all_packages) - get_package_names(binary_packages)
+    )
+    no_binary = (
+        [f"--no-binary={','.join(source_only_packages)}"]
+        if source_only_packages
+        else ()
+    )
 
     return [
         *prefix,
@@ -129,7 +138,9 @@ def get_pip_command(
 
 def get_pip_version(pip_cmd: str) -> tuple[int, ...]:
     """Get the version of pip available from a specific pip command."""
-    result = subprocess.run([pip_cmd, "--version"], text=True, capture_output=True, check=True)
+    result = subprocess.run(
+        [pip_cmd, "--version"], text=True, capture_output=True, check=True
+    )
     version_data = result.stdout.split(" ")
     if len(version_data) < 2:
         raise ValueError("Unknown pip version")

@@ -1,4 +1,4 @@
-# Copyright 2021-2022 Canonical Ltd.
+# Copyright 2021-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,23 +15,34 @@
 # For further info, check https://github.com/canonical/charmcraft
 
 """Analyze and lint charm structures and files."""
+
 import abc
 import ast
 import os
 import pathlib
+import re
 import shlex
+import subprocess
+import sys
 import typing
-from collections.abc import Generator
+from collections.abc import Collection, Generator
 from typing import final
 
 import yaml
+from craft_cli import emit
 
-from charmcraft import config, const, utils
-from charmcraft.metafiles.metadata import parse_charm_metadata_yaml, read_metadata_yaml
+from charmcraft import const, utils
 from charmcraft.models.lint import CheckResult, CheckType, LintResult
+from charmcraft.models.metadata import CharmMetadataLegacy
 
 # the documentation page for "Analyzers and linters"
 BASE_DOCS_URL = "https://juju.is/docs/sdk/charmcraft-analyzers-and-linters"
+PYTHON_NAME_REGEX = re.compile(
+    r"^([A-Z0-9]([A-Z0-9._-]*[A-Z0-9])?)", flags=re.IGNORECASE
+)
+MIN_VERSION_REGEX = re.compile(r">=\s*([\d.]+)")
+APPROX_VERSION_REGEX = re.compile(r"(?:~=\s*([\d.]+)\.\d|==\s*([\d.]+)\.\*)")
+EXACT_VERSION_REGEX = re.compile(r"==\s*([\d.]+)")
 
 
 def get_entrypoint_from_dispatch(basedir: pathlib.Path) -> pathlib.Path | None:
@@ -88,8 +99,10 @@ class BaseChecker(metaclass=abc.ABCMeta):
         """Get the result of a single checker."""
         try:
             result = self.run(base_dir)
-        except Exception:
+        except Exception as exc:
             result = self.exception_result
+            if not self.text:
+                self.text = str(exc)
         return CheckResult(
             check_type=self.check_type,
             name=self.name,
@@ -189,13 +202,20 @@ class Framework(AttributeChecker):
 
     def __init__(self):
         self.result = None
+        self.__text = None
 
     @property
-    def text(self):
+    def text(self) -> str:
         """Return a text in function of the result state."""
+        if self.__text:
+            return self.__text
         if self.result is None:
-            return None
+            return ""
         return self.result_texts[self.result]
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self.__text = value
 
     def _get_imports(self, filepath: pathlib.Path) -> Generator[list[str], None, None]:
         """Parse a Python filepath and yield its imports.
@@ -235,7 +255,9 @@ class Framework(AttributeChecker):
     def _check_reactive(self, basedir: pathlib.Path) -> bool:
         """Detect if the Reactive Framework is used."""
         try:
-            metadata = parse_charm_metadata_yaml(basedir)
+            metadata = CharmMetadataLegacy.from_yaml_file(
+                basedir / const.METADATA_FILENAME
+            )
         except Exception:
             # file not found, corrupted, or mandatory "name" not present
             return False
@@ -243,7 +265,9 @@ class Framework(AttributeChecker):
         wheelhouse_dir = basedir / "wheelhouse"
         if not wheelhouse_dir.exists():
             return False
-        if not any(f.name.startswith("charms.reactive-") for f in wheelhouse_dir.iterdir()):
+        if not any(
+            f.name.startswith("charms.reactive-") for f in wheelhouse_dir.iterdir()
+        ):
             return False
 
         module_basename = metadata.name.replace("-", "_")
@@ -255,14 +279,12 @@ class Framework(AttributeChecker):
 
     def run(self, basedir: pathlib.Path) -> str:
         """Run the proper verifications."""
+        self.result = self.Result.UNKNOWN
         if self._check_operator(basedir):
-            result = self.Result.OPERATOR
+            self.result = self.Result.OPERATOR
         elif self._check_reactive(basedir):
-            result = self.Result.REACTIVE
-        else:
-            result = self.Result.UNKNOWN
-        self.result = result
-        return result
+            self.result = self.Result.REACTIVE
+        return self.result
 
 
 class JujuMetadata(Linter):
@@ -284,7 +306,8 @@ class JujuMetadata(Linter):
     def run(self, basedir: pathlib.Path) -> str:
         """Run the proper verifications."""
         try:
-            metadata = read_metadata_yaml(basedir)
+            with (basedir / const.METADATA_FILENAME).open("rt") as md_file:
+                metadata = yaml.safe_load(md_file)
         except yaml.YAMLError:
             self.text = "The metadata.yaml file is not a valid YAML file."
             return self.Result.ERROR
@@ -424,9 +447,13 @@ class NamingConventions(Linter):
             return warnings
 
         with config_file.open("rt", encoding="utf8") as fh:
-            options = content.get("options", {}) if (content := yaml.safe_load(fh)) else {}
+            options = (
+                content.get("options", {}) if (content := yaml.safe_load(fh)) else {}
+            )
 
-        if check := NamingConventions.check_naming_convention(options.keys(), "config-options"):
+        if check := NamingConventions.check_naming_convention(
+            options.keys(), "config-options"
+        ):
             warnings.append(check)
 
         return warnings
@@ -456,7 +483,9 @@ class NamingConventions(Linter):
             for param in content.get(action_name, {}).get("params", [])
         ]
 
-        if check := NamingConventions.check_naming_convention(actions_params, "action params"):
+        if check := NamingConventions.check_naming_convention(
+            actions_params, "action params"
+        ):
             warnings.append(check)
 
         return warnings
@@ -497,7 +526,9 @@ class Entrypoint(Linter):
         """Run the proper verifications."""
         entrypoint = get_entrypoint_from_dispatch(basedir)
         if entrypoint is None:
-            self.text = "Cannot find a proper 'dispatch' script pointing to an entrypoint."
+            self.text = (
+                "Cannot find a proper 'dispatch' script pointing to an entrypoint."
+            )
             return self.Result.NONAPPLICABLE
 
         if not entrypoint.exists():
@@ -513,6 +544,101 @@ class Entrypoint(Linter):
             return self.Result.ERROR
 
         return self.Result.OK
+
+
+class OpsMainCall(Linter):
+    """Check that the entrypoint contains call to ops.main()."""
+
+    name = "ops-main-call"
+    url = f"{BASE_DOCS_URL}#heading--ops-main-call"
+    text = ""
+
+    def run(self, basedir: pathlib.Path) -> str:
+        """Check preconditions and validate there's an ops.main() call."""
+        if Framework().run(basedir) != Framework.Result.OPERATOR:
+            self.text = "The charm is not based on the operator framework"
+            return self.Result.NONAPPLICABLE
+
+        entrypoint = get_entrypoint_from_dispatch(basedir)
+        if entrypoint is None:
+            self.text = (
+                "Cannot find a proper 'dispatch' script pointing to an entrypoint."
+            )
+            return self.Result.NONAPPLICABLE
+
+        if not entrypoint.exists():
+            self.text = f"Cannot find the entrypoint file: {str(entrypoint)!r}"
+            return self.Result.NONAPPLICABLE
+
+        if not self._check_main_calls(entrypoint.read_text()):
+            self.text = f"The ops.main() call missing from {str(entrypoint)!r}."
+            return self.Result.ERROR
+
+        return self.Result.OK
+
+    def _check_main_calls(self, code: str):
+        tree = ast.parse(code)
+        imports = self._ops_main_imports(tree)
+        return self._detect_main_calls(tree, imports=imports)
+
+    def _ops_main_imports(self, tree: ast.AST) -> dict[str, str]:
+        """Analyze imports and return a mapping {local_name: imported thing}."""
+        rv = {}
+
+        class ImportVisitor(ast.NodeVisitor):
+            def visit_Import(self, node: ast.Import):  # noqa: N802
+                for alias in node.names:
+                    # Detect statements like `import ops`
+                    if alias.name == "ops":
+                        rv[alias.asname or alias.name] = "ops"
+                    if alias.name == "ops.main" and alias.asname:
+                        rv[alias.asname] = "ops.main"
+                    elif alias.name.startswith("ops.") and not alias.asname:
+                        rv["ops"] = "ops"
+
+            def visit_ImportFrom(self, node: ast.ImportFrom):  # noqa: N802
+                for alias in node.names:
+                    # Detect statements like `from ops import main [as ops_main]`
+                    if node.module in ("ops", "ops.main") and alias.name == "main":
+                        rv[alias.asname or alias.name] = f"{node.module}.main"
+
+        ImportVisitor().visit(tree)
+        return rv
+
+    def _detect_main_calls(self, tree: ast.AST, *, imports: dict[str, str]) -> bool:
+        main_call_sites = []
+
+        class OpsMainFinder(ast.NodeVisitor):
+            def visit_Call(self, node: ast.Call):  # noqa: N802
+                match node.func:
+                    # Matches statements like `ops.main.main(...)`
+                    case ast.Attribute(
+                        value=ast.Attribute(value=ast.Name(id=first), attr=second),
+                        attr=third,
+                    ):
+                        call_site = f"{first}.{second}.{third}(...)"
+                    # Matches statements like `ops.main(...)`
+                    case ast.Attribute(value=ast.Name(id=first), attr=second):
+                        call_site = f"{first}.{second}(...)"
+                    # Matches statements like `main(...)`
+                    case ast.Name(id=first):
+                        call_site = f"{first}(...)"
+                    case _:
+                        call_site = "_dummy()"
+
+                match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)(.*)", call_site)
+                if not match:
+                    raise ValueError("impossible")
+                alias, rest = match.groups()
+                resolved = f"{imports.get(alias, '_dummy')}{rest}"
+
+                if resolved in ("ops.main(...)", "ops.main.main(...)"):
+                    main_call_sites.append(call_site)
+
+                self.generic_visit(node)
+
+        OpsMainFinder().visit(tree)
+        return any(main_call_sites)
 
 
 class AdditionalFiles(Linter):
@@ -534,7 +660,9 @@ class AdditionalFiles(Linter):
         )
     }
 
-    def _check_additional_files(self, stage_dir: pathlib.Path, prime_dir: pathlib.Path) -> str:
+    def _check_additional_files(
+        self, stage_dir: pathlib.Path, prime_dir: pathlib.Path
+    ) -> str:
         """Compare the staged files with the prime files."""
         errors: list[str] = []
         stage_dir = stage_dir.absolute()
@@ -550,7 +678,9 @@ class AdditionalFiles(Linter):
                 errors.append(f"File '{prime_file}' is not staged but in the charm.")
 
         if errors:
-            self.text = "Error: Additional files found in the charm:\n" + "\n".join(errors)
+            self.text = "Error: Additional files found in the charm:\n" + "\n".join(
+                errors
+            )
             return self.Result.ERROR
 
         return self.Result.OK
@@ -560,10 +690,187 @@ class AdditionalFiles(Linter):
         stage_dir = basedir.parent / "stage"
         if not stage_dir.exists() or not stage_dir.is_dir():
             # Does not work without the build environment
-            self.text = "Additional files check not applicable without a build environment."
+            self.text = (
+                "Additional files check not applicable without a build environment."
+            )
             return self.Result.NONAPPLICABLE
 
         return self._check_additional_files(stage_dir, basedir)
+
+
+class PipCheck(Linter):
+    """Check that the pip virtual environment is valid."""
+
+    name = "pip-check"
+    text = "Virtual environment is valid."
+    url = "https://pip.pypa.io/en/stable/cli/pip_check/"
+
+    def run(self, basedir: pathlib.Path) -> str:
+        """Run pip check."""
+        venv_dir = basedir / "venv"
+        if not venv_dir.is_dir():
+            self.text = "Charm does not contain a Python venv."
+            return self.Result.NONAPPLICABLE
+        if not (venv_dir / "lib").is_dir():
+            self.text = "Python venv is not valid."
+            return self.Result.NONAPPLICABLE
+        if sys.platform == "win32":
+            self.text = "Linter does not work on Windows."
+            return self.Result.NONAPPLICABLE
+        python_exe = venv_dir / "bin" / "python"
+        delete_parent = False
+        if not python_exe.parent.exists():
+            delete_parent = True
+            python_exe.parent.mkdir()
+        if not python_exe.exists():
+            delete_python_exe = True
+            python_exe.symlink_to(sys.executable)
+        else:
+            delete_python_exe = False
+
+        pip_cmd = [sys.executable, "-m", "pip", "--python", str(python_exe), "check"]
+        try:
+            check = subprocess.run(
+                pip_cmd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if check.returncode == os.EX_OK:
+                result = self.Result.OK
+            else:
+                self.text = check.stdout
+                result = self.Result.WARNING
+        except (FileNotFoundError, PermissionError) as e:
+            self.text = (
+                f"{e.strerror}: Could not run Python executable at {sys.executable}."
+            )
+            result = self.Result.NONAPPLICABLE
+        finally:
+            if delete_python_exe:
+                python_exe.unlink()
+            if delete_parent:
+                python_exe.parent.rmdir()
+
+        return result
+
+
+class PyDeps(Linter):
+    """Check that all pydeps from all libs are available."""
+
+    name = "pydeps"
+    text = "All charmlibs dependencies are included"
+    url = "https://canonical-charmcraft.readthedocs-hosted.com/en/stable/howto/manage-libraries/"
+
+    @staticmethod
+    def convert_to_fs(name: str) -> str:
+        """Convert a package name into its on-disk form.
+
+        This method will match the appearance a module's name would have in
+        a site-packages directory.
+
+        This turns "craft-cli", "craft_cli", "Craft-Cli" and "craft.cli" all into "craft_cli".
+        """
+        return re.sub(r"[-_.]+", "_", name).lower()
+
+    @staticmethod
+    def get_version_tuple(version_str: str) -> tuple[int | str, ...]:
+        """Get a version tuple from a version string."""
+
+        def coerce_to_int(s: str) -> str | int:
+            try:
+                return int(s)
+            except ValueError:
+                return s
+
+        return tuple(coerce_to_int(s) for s in version_str.split("."))
+
+    @classmethod
+    def version_matches(
+        cls, dep_spec: str, version: tuple[int | str, ...]
+    ) -> bool | None:
+        """Check if the given version matches the dependency specifier."""
+        spec_matched = False
+        for match in MIN_VERSION_REGEX.finditer(dep_spec):
+            spec_matched = True
+            if version >= cls.get_version_tuple(match.group(1)):
+                return True
+        for match in EXACT_VERSION_REGEX.finditer(dep_spec):
+            spec_matched = True
+            if version == cls.get_version_tuple(match.group(1)):
+                return True
+        for match in APPROX_VERSION_REGEX.finditer(dep_spec):
+            spec_matched = True
+            versions = set(match.group(1, 2)) - {None}
+            match_version = cls.get_version_tuple(versions.pop())
+            if version[: len(match_version)] == match_version:
+                return True
+
+        return not spec_matched
+
+    @classmethod
+    def _get_missing_deps(
+        cls, deps: Collection[str], venv_path: pathlib.Path
+    ) -> tuple[set[str], set[str]]:
+        """Get the missing dependencies for a charmlib."""
+        libs_path = next((venv_path / "lib").glob("python*")) / "site-packages"
+
+        missing = set()
+        non_matching_version = set()
+        for dep in deps:
+            match = PYTHON_NAME_REGEX.match(dep)
+            if not match:
+                continue
+            name = cls.convert_to_fs(match.group(1))
+
+            # If the package is installed as a distribution, we'll check the version.
+            if infos := set(libs_path.glob(f"{name}*.dist-info")):
+                info = infos.pop()
+                # Trim the ".dist-info" off of the directory name, then extract
+                # everything past the last "-" as that will always be the version.
+                version_str = info.name[:-10].rpartition("-")[2]
+                version = cls.get_version_tuple(version_str)
+                if cls.version_matches(dep, version):
+                    continue
+                non_matching_version.add(dep)
+                continue
+            # Check if dependency exists as a top-level module
+            if (libs_path / name).is_dir() or (libs_path / f"{name}.py").is_file():
+                continue
+            missing.add(match.group(1))
+
+        return missing, non_matching_version
+
+    def run(self, basedir: pathlib.Path) -> str:
+        """Run the pydeps checker."""
+        venv_dir = basedir / "venv"
+        if not venv_dir.is_dir():
+            self.text = "Charm does not contain a Python venv."
+            return self.Result.NONAPPLICABLE
+        lib_dir = basedir / "lib/charms"
+        if not lib_dir.is_dir():
+            self.text = "Charm does not have any charmlibs."
+            return self.Result.NONAPPLICABLE
+
+        deps = utils.collect_charmlib_pydeps(basedir=basedir)
+        try:
+            missing_deps, non_matching_versions = self._get_missing_deps(deps, venv_dir)
+        except Exception as exc:
+            self.text = str(exc)
+            emit.debug(exc)
+            return self.Result.UNKNOWN
+
+        if missing_deps:
+            missing_deps_str = ", ".join(sorted(missing_deps))
+            self.text = f"Missing charmlibs dependencies: {missing_deps_str}"
+            return self.Result.ERROR
+
+        if non_matching_versions:
+            non_matching_versions_str = "\n".join(sorted(non_matching_versions))
+            self.text = f"Installed packages don't match charmlibs PYDEPS:\n{non_matching_versions_str}"
+            return self.Result.WARNING
+
+        return self.Result.OK
 
 
 # all checkers to run; the order here is important, as some checkers depend on the
@@ -576,52 +883,8 @@ CHECKERS: list[type[BaseChecker]] = [
     NamingConventions,
     Framework,
     Entrypoint,
+    OpsMainCall,
     AdditionalFiles,
+    PipCheck,
+    PyDeps,
 ]
-
-
-def analyze(
-    config: config.CharmcraftConfig,
-    basedir: pathlib.Path,
-    *,
-    override_ignore_config: bool = False,
-) -> list[CheckResult]:
-    """Run all checkers and linters."""
-    all_results = []
-    for cls in CHECKERS:
-        # do not run the ignored ones
-        if cls.check_type == CheckType.ATTRIBUTE:
-            ignore_list = config.analysis.ignore.attributes
-        else:
-            ignore_list = config.analysis.ignore.linters
-        if cls.name in ignore_list and not override_ignore_config:
-            all_results.append(
-                CheckResult(
-                    check_type=cls.check_type,
-                    name=cls.name,
-                    result=LintResult.IGNORED,
-                    url=cls.url,
-                    text="",
-                )
-            )
-            continue
-
-        checker = cls()
-        try:
-            result = checker.run(basedir)
-        except Exception:
-            result = (
-                LintResult.UNKNOWN
-                if checker.check_type == CheckType.ATTRIBUTE
-                else LintResult.FATAL
-            )
-        all_results.append(
-            CheckResult(
-                check_type=checker.check_type,
-                name=checker.name,
-                url=checker.url,
-                text=checker.text or "n/a",
-                result=result,
-            )
-        )
-    return all_results

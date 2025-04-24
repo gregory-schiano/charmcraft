@@ -17,8 +17,13 @@
 """Extension processor and related utilities."""
 
 from charmcraft.extensions._utils import apply_extensions
+from charmcraft.extensions.app import (
+    DjangoFramework,
+    FastAPIFramework,
+    FlaskFramework,
+    GoFramework,
+)
 from charmcraft.extensions.extension import Extension
-from charmcraft.extensions.gunicorn import FlaskFramework
 from charmcraft.extensions.registry import (
     get_extension_class,
     get_extension_names,
@@ -27,9 +32,8 @@ from charmcraft.extensions.registry import (
     unregister,
 )
 
-register("flask-framework", FlaskFramework)
-
 __all__ = [
+    "DjangoFramework",
     "Extension",
     "FlaskFramework",
     "get_extension_class",
@@ -39,3 +43,8 @@ __all__ = [
     "register",
     "unregister",
 ]
+
+register("flask-framework", FlaskFramework)
+register("django-framework", DjangoFramework)
+register("go-framework", GoFramework)
+register("fastapi-framework", FastAPIFramework)

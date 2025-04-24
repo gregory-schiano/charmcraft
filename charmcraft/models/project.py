@@ -1,4 +1,4 @@
-# Copyright 2023-2024 Canonical Ltd.
+# Copyright 2023,2025 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,126 +14,88 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Project-related models for Charmcraft."""
+
 import abc
 import datetime
 import pathlib
 import re
+import textwrap
+import warnings
 from collections.abc import Iterable, Iterator
 from typing import (
+    Annotated,
     Any,
     Literal,
     cast,
 )
 
+import craft_platforms
 import pydantic
-from craft_application import errors, models
-from craft_application.util import get_host_architecture, safe_yaml_load
-from craft_cli import CraftError
+import pydantic.v1
+from craft_application import errors, models, util
+from craft_application.util import safe_yaml_load
+from craft_cli import CraftError, emit
+from craft_platforms import charm
 from craft_providers import bases
 from pydantic import dataclasses
-from typing_extensions import Self, TypedDict
+from typing_extensions import Self, override
 
 from charmcraft import const, preprocess, utils
 from charmcraft.const import (
     BaseStr,
     BuildBaseStr,
-    CharmArch,
 )
 from charmcraft.models import charmcraft
 from charmcraft.models.charmcraft import (
     AnalysisConfig,
     BasesConfiguration,
-    CharmhubConfig,
+    Charmhub,
     Links,
 )
 from charmcraft.parts import process_part_config
 
-
-class BaseDict(TypedDict, total=False):
-    """TypedDict that describes only one base.
-
-    This is equivalent to the short form base definition.
-    """
-
-    name: str
-    channel: str
-    architectures: list[str]
-
-
-LongFormBasesDict = TypedDict(
-    "LongFormBasesDict", {"build-on": list[BaseDict], "run-on": list[BaseDict]}
-)
-
-
-class CharmcraftSummaryStr(models.SummaryStr):
-    """A brief summary of this charm or bundle. Ideally, this should fit into one line."""
-
+CharmcraftSummaryStr = Annotated[
+    str,
+    models.SummaryStr,
+    pydantic.StringConstraints(max_length=200),
     # Maximum length was set to 200 characters because the 78 character maximum
     # inherited from craft-application is too restrictive, as several hundred charms
     # already exceed this maximum.
     # Eventually this limit will be reduced, ideally to 78 characters, though that may
     # never happen entirely. Reductions will only occur on major releases.
     # https://github.com/canonical/charmcraft/issues/1598
-    max_length = 200
+]
 
 
-class CharmPlatform(pydantic.ConstrainedStr):
-    """The platform string for a charm file.
-
-    This is to be generated in the form of the bases config in a charm file name.
-    A charm's filename may look as follows:
-        "{name}_{base0}_{base1}_{base...}.charm"
-    where each base takes the form of:
-        "{base_name}-{version}-{arch0}-{arch1}-{arch...}"
-
-    For example, a charm called "test" that's built to run on Alma Linux 9 and Ubuntu 22.04
-    on s390x and riscv64 platforms will have the name:
-        test_almalinux-9-riscv64-s390x_ubuntu-22.04-riscv64-s390x.charm
-    """
-
-    min_length = 4
-    strict = True
-    strip_whitespace = True
-    _host_arch = get_host_architecture()
-
-    @classmethod
-    def from_bases(cls: type[Self], bases: Iterable[charmcraft.Base]) -> Self:
-        """Generate a platform name from a list of charm bases."""
-        base_strings = []
-        for base in bases:
-            name = base.name
-            version = base.channel
-            architectures = "-".join(base.architectures)
-            base_strings.append(f"{name}-{version}-{architectures}")
-        return cls("_".join(base_strings))
+def get_charm_file_platform_str(bases: Iterable[charmcraft.Base]) -> str:
+    """Get the "platform" section of a charm file name from an iterable of bases."""
+    base_strings = []
+    for base in bases:
+        name = base.name
+        version = base.channel
+        architectures = "-".join(base.architectures)
+        base_strings.append(f"{name}-{version}-{architectures}")
+    return "_".join(base_strings)
 
 
-class Platform(models.CraftBaseModel):
-    """Project platform definition."""
-
-    build_on: list[CharmArch] = pydantic.Field(min_items=1)
-    build_for: list[CharmArch | Literal["all"]] = pydantic.Field(min_items=1, max_items=1)
-
-    @pydantic.validator("build_on", "build_for", pre=True)
-    def _listify_architectures(cls, value: str | list[str]) -> list[str]:
-        if isinstance(value, str):
-            return [value]
-        return value
+CharmPlatform = Annotated[str, pydantic.StringConstraints(min_length=4, strict=True)]
 
 
 class CharmLib(models.CraftBaseModel):
     """A Charm library dependency for this charm."""
 
     lib: str = pydantic.Field(
-        title="Library Path (e.g. my_charm.my_library)",
-        regex=r"[a-z0-9_]+\.[a-z0-9_]+",
+        title="Library Path (e.g. my-charm.my_library)",
+        pattern=r"[a-z][a-z0-9_-]+\.[a-z][a-z0-9_]+",
     )
     version: str = pydantic.Field(
         title="Version filter for the charm. Either an API version or a specific [api].[patch].",
-        regex=r"[0-9]+(\.[0-9]+)?",
+        pattern=r"[0-9]+(\.[0-9]+)?",
+        coerce_numbers_to_str=False,
+        strict=True,
     )
 
-    @pydantic.validator("lib", pre=True)
+    @pydantic.field_validator("lib", mode="before")
     def _validate_name(cls, value: str) -> str:
         """Validate the lib field, providing a useful error message on failure."""
         charm_name, _, lib_name = str(value).partition(".")
@@ -141,31 +103,36 @@ class CharmLib(models.CraftBaseModel):
             raise ValueError(
                 f"Library name invalid. Expected '[charm_name].[lib_name]', got {value!r}"
             )
-        if not re.fullmatch("[a-z0-9_]+", charm_name):
-            if "-" in charm_name:
-                raise ValueError(
-                    f"Invalid charm name in lib {value!r}. Try replacing hyphens ('-') with underscores ('_')."
-                )
+        # Accept python-importable charm names, but convert them to store-accepted names.
+        if "_" in charm_name:
+            charm_name = charm_name.replace("_", "-")
+        if not re.fullmatch("[a-z0-9_-]+", charm_name):
             raise ValueError(
                 f"Invalid charm name for lib {value!r}. Value {charm_name!r} is invalid."
             )
         if not re.fullmatch("[a-z0-9_]+", lib_name):
-            raise ValueError(f"Library name {lib_name!r} is invalid.")
-        return str(value)
+            raise ValueError(
+                f"Library name {lib_name!r} is invalid. Library names must be valid Python module names."
+            )
+        return f"{charm_name}.{lib_name}"
 
-    @pydantic.validator("version", pre=True)
+    @pydantic.field_validator("version", mode="before")
     def _validate_api_version(cls, value: str) -> str:
         """Validate the API version field, providing a useful error message on failure."""
         api, *_ = str(value).partition(".")
         try:
             int(api)
         except ValueError:
-            raise ValueError(f"API version not valid. Expected an integer, got {api!r}") from None
+            raise ValueError(
+                f"API version not valid. Expected an integer, got {api!r}"
+            ) from None
         return str(value)
 
-    @pydantic.validator("version", pre=True)
-    def _validate_patch_version(cls, value: str) -> str:
+    @pydantic.field_validator("version", mode="before")
+    def _validate_patch_version(cls, value: str | float) -> str:
         """Validate the optional patch version, providing a useful error message."""
+        if not isinstance(value, str):
+            raise ValueError("Input should be a valid string")  # noqa: TRY004
         api, separator, patch = value.partition(".")
         if not separator:
             return value
@@ -234,7 +201,7 @@ class CharmBuildInfo(models.BuildInfo):
 
         build_for = "-".join(sorted(all_architectures))
 
-        platform = CharmPlatform.from_bases(run_on)
+        platform = get_charm_file_platform_str(run_on)
 
         return cls(
             platform=platform,
@@ -354,14 +321,16 @@ class CharmcraftBuildPlanner(models.BuildPlanner):
     bases: list[BasesConfiguration] = pydantic.Field(default_factory=list)
     base: str | None = None
     build_base: str | None = None
-    platforms: dict[str, Platform | None] | None = None
+    platforms: dict[str, models.Platform | None] | None = None  # type: ignore[assignment]
 
-    @pydantic.validator("bases", pre=True, each_item=True, allow_reuse=True)
-    def expand_base(cls, base: BaseDict | LongFormBasesDict) -> LongFormBasesDict:
-        """Expand short-form bases into long-form bases."""
-        if "name" not in base:  # Assume long-form base already.
-            return cast(LongFormBasesDict, base)
-        return cast(LongFormBasesDict, {"build-on": [base], "run-on": [base]})
+    @override
+    @pydantic.field_validator("platforms", mode="before")
+    @classmethod
+    def _populate_platforms(cls, platforms: dict[str, Any]) -> dict[str, Any]:
+        """Overrides the validator to prevent platforms from being modified.
+
+        Modifying the platforms field can break multi-base builds."""
+        return platforms
 
     def get_build_plan(self) -> list[models.BuildInfo]:
         """Get build bases for this charm.
@@ -374,53 +343,47 @@ class CharmcraftBuildPlanner(models.BuildPlanner):
         """
         if self.type == "bundle":
             # A bundle can build anywhere, so just present the current system.
-            current_arch = utils.get_host_architecture()
+            current_arch = util.get_host_architecture()
             current_base = utils.get_os_platform()
             return [
                 models.BuildInfo(
                     platform=current_arch,
                     build_on=current_arch,
                     build_for=current_arch,
-                    base=bases.BaseName(name=current_base.system, version=current_base.release),
+                    base=bases.BaseName(
+                        name=current_base.system, version=current_base.release
+                    ),
                 )
             ]
-        if not self.base:
+        if not self.base and not self.platforms:
             return list(CharmBuildInfo.gen_from_bases_configurations(*self.bases))
-
-        build_base = self.build_base or self.base
-        base_name, _, base_version = build_base.partition("@")
-        base = bases.BaseName(name=base_name, version=base_version)
 
         if self.platforms is None:
             raise CraftError("Must define at least one platform.")
-        build_infos = []
-        for platform_name, platform in self.platforms.items():
-            if platform is None:
-                if platform_name not in const.SUPPORTED_ARCHITECTURES:
-                    raise CraftError(
-                        f"Invalid platform {platform_name}.",
-                        details="A platform name must either be a valid architecture name or the "
-                        "platform must specify one or more build-on and build-for architectures.",
-                    )
-                build_infos.append(
-                    models.BuildInfo(
-                        platform_name, build_on=platform_name, build_for=platform_name, base=base
-                    )
-                )
-            else:
-                for build_on in platform.build_on:
-                    build_infos.extend(
-                        [
-                            models.BuildInfo(
-                                platform_name,
-                                build_on=str(build_on),
-                                build_for=str(build_for),
-                                base=base,
-                            )
-                            for build_for in platform.build_for
-                        ]
-                    )
-        return build_infos
+        platforms = cast(
+            # https://github.com/canonical/craft-platforms/issues/43
+            craft_platforms.Platforms,  # pyright: ignore[reportPrivateImportUsage]
+            {
+                name: (platform.marshal() if platform else None)
+                for name, platform in self.platforms.items()
+            },
+        )
+        build_infos = charm.get_platforms_charm_build_plan(
+            base=self.base,
+            build_base=self.build_base,
+            platforms=platforms,
+        )
+        return [
+            models.BuildInfo(
+                platform=info.platform,
+                build_on=str(info.build_on),
+                build_for=str(info.build_for),
+                base=bases.BaseName(
+                    name=info.build_base.distribution, version=info.build_base.series
+                ),
+            )
+            for info in build_infos
+        ]
 
 
 class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
@@ -435,13 +398,28 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
     """
 
     type: Literal["charm", "bundle"]
-    title: models.ProjectTitle | None
-    summary: CharmcraftSummaryStr | None
-    description: str | None
+    title: models.ProjectTitle | None = None
+    summary: CharmcraftSummaryStr | None = None
+    description: str | None = None
 
-    analysis: AnalysisConfig | None
-    charmhub: CharmhubConfig | None
-    parts: dict[str, dict[str, Any]] = pydantic.Field(default_factory=dict)
+    analysis: AnalysisConfig | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            How analysis done on the charm will behave.
+
+            Currently the only options are to ignore attributes or linters."""
+        ),
+    )
+    charmhub: Charmhub | None = pydantic.Field(
+        default=None,
+        description="(DEPRECATED): Configuration for accessing charmhub.",
+        deprecated=(
+            "The 'charmhub' field is deprecated and no longer used. It will be removed in a "
+            f"future release. Use the ${const.STORE_API_ENV_VAR}, ${const.STORE_STORAGE_ENV_VAR} "
+            f"and ${const.STORE_REGISTRY_ENV_VAR} environment variables instead."
+        ),
+    )
 
     # Default project properties that Charmcraft currently does not use. Types are set
     # to be Optional[None], preventing them from being used, but allow them to be used
@@ -458,7 +436,9 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
 
     # These private attributes are not part of the project model but are attached here
     # because Charmcraft uses this metadata.
-    _started_at: datetime.datetime = pydantic.PrivateAttr(default_factory=datetime.datetime.utcnow)
+    _started_at: datetime.datetime = pydantic.PrivateAttr(
+        default_factory=lambda: datetime.datetime.now(tz=datetime.timezone.utc)
+    )
     _valid: bool = pydantic.PrivateAttr(default=False)
 
     @property
@@ -470,7 +450,7 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
     def unmarshal(cls, data: dict[str, Any]):
         """Create a Charmcraft project from a dictionary of data."""
         if cls is not CharmcraftProject:
-            return cls.parse_obj(data)
+            return cls.model_validate(data)
         project_type = data.get("type")
         if project_type == "charm":
             if "bases" in data:
@@ -525,24 +505,30 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
 
         return project
 
-    @pydantic.root_validator(pre=True, allow_reuse=True)
-    def preprocess(cls, values: dict[str, Any]) -> dict[str, Any]:
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def _preprocess(cls, values: dict[str, Any]) -> dict[str, Any]:
         """Preprocess any values that charmcraft infers, before attribute validation."""
         if "type" not in values:
             raise ValueError("Project type must be declared in charmcraft.yaml.")
 
         return values
 
-    @pydantic.validator("parts", pre=True, always=True, allow_reuse=True)
-    def preprocess_parts(
-        cls, parts: dict[str, dict[str, Any]] | None, values: dict[str, Any]
+    @pydantic.field_validator("parts", mode="before")
+    @classmethod
+    def _preprocess_parts(
+        cls, parts: dict[str, dict[str, Any]] | None, info: pydantic.ValidationInfo
     ) -> dict[str, dict[str, Any]]:
         """Preprocess parts object for a charm or bundle, creating an implicit part if needed."""
         if parts is not None and not isinstance(parts, dict):
-            raise TypeError("'parts' in charmcraft.yaml must conform to the charmcraft.yaml spec.")
+            raise TypeError(
+                "'parts' in charmcraft.yaml must conform to the charmcraft.yaml spec."
+            )
         if not parts:
-            if "type" in values:
-                parts = {values["type"]: {"plugin": values["type"]}}
+            if info.config and info.config.get("title") == "Bundle":
+                parts = {"bundle": {"plugin": "bundle"}}
+            elif "type" in info.data:
+                parts = {info.data["type"]: {"plugin": info.data["type"]}}
             else:
                 parts = {}
         for name, part in parts.items():
@@ -558,136 +544,573 @@ class CharmcraftProject(models.Project, metaclass=abc.ABCMeta):
 
             if name == "bundle" and part["plugin"] == "bundle":
                 part.setdefault("source", ".")
-        return parts
+        return {name: process_part_config(part) for name, part in parts.items()}
 
-    @pydantic.validator("parts", each_item=True, allow_reuse=True)
-    def validate_each_part(cls, item):
-        """Verify each part in the parts section. Craft-parts will re-validate them."""
-        return process_part_config(item)
+    @pydantic.model_validator(mode="after")
+    def _warn_charmhub_deprecated(self) -> Self:
+        repeat = False
+        with warnings.catch_warnings(record=True) as caught:
+            if self.charmhub:
+                repeat = True
+                for warning in caught:
+                    if isinstance(warning.message, Warning):
+                        message = warning.message.args[0]
+                    else:
+                        message = warning.message
+                    emit.progress(f"WARNING: {message}", permanent=True)
+        if repeat:
+            for warning in caught:
+                warnings.warn(warning.message, stacklevel=1)
+        return self
 
 
-class BasesCharm(CharmcraftProject):
-    """Model for defining a charm."""
+class CharmProject(CharmcraftProject):
+    """A base class for all charm types."""
 
     type: Literal["charm"]
-    name: models.ProjectName
-    summary: CharmcraftSummaryStr
-    description: str
+    """The type of project. Must be the string ``charm``."""
+    name: models.ProjectName = pydantic.Field(
+        description=textwrap.dedent(
+            """\
+            The name of the project on Charmhub.
+
+            This value will be used both in the URL of the charm on Charmhub and when
+            deploying the charm with juju.
+
+            Charms should follow the
+            `charm naming guidelines <https://juju.is/docs/sdk/naming>`_."""
+        ),
+        examples=[
+            "mysql",
+            "mysql-k8s",
+        ],
+    )
+    summary: CharmcraftSummaryStr = pydantic.Field(  # pyright: ignore[reportGeneralTypeIssues]
+        description="A brief (one-line) summary of your charm.",
+    )
+    description: str = pydantic.Field(  # pyright: ignore[reportGeneralTypeIssues]
+        description="A multi-line summary of your charm."
+    )
+
+    actions: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Defines one or more actions.
+
+            This key is equivalent to the
+            `actions.yaml file <https://juju.is/docs/sdk/actions-yaml>`_."""
+        ),
+    )
+    assumes: list[str | dict[str, list | dict]] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Explicitly state features a Juju model must be able to provide for a
+            successful deployment of this charm. When a charm includes such
+            requirements, Juju performs a pre-deployment check and displays
+            user-friendly error messages if a feature requirement cannot be met by the
+            model that the user is trying to deploy the charm to. If the assumes
+            section of the charm metadata is omitted, Juju will make a best-effort
+            attempt to deploy the charm, and users must rely on the output of
+            ``juju status`` to figure out whether the deployment was successful.
+
+            The key consists of a list of features that can be given either directly
+            or, depending on the complexity of the condition you want to enforce,
+            nested under one or both of the boolean expressions any-of or all-of,
+            as shown below. In order for a charm to be deployed, all entries in the
+            assumes block must be satisfied.
+
+            Structure::
+
+                assumes:
+                  - <feature-1>
+                  - any-of:
+                    - <feature-2>
+                    - <feature-3>
+                  - all-of:
+                    - <feature-4>
+                    - <feature-5>
+
+            Juju version requirements can be specified with a string such as
+            ``juju >= 3.5`` or ``juju < 4.0``. A full list of supported features
+            can be found in the
+            `Juju documentation <https://juju.is/docs/juju/supported-features>`_.
+            """
+        ),
+    )
+    charm_user: Literal["root", "sudoer", "non-root"] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Specifies that the charm code does not need to be run as root. Possible
+            values are:
+
+            - ``root``: the charm will run as root
+            - ``sudoer``: the charm will run as a non-root user with access to root
+              privileges using ``sudo``.
+            - ``non-root``: the charm will run as a non-root user without ``sudo``.
+
+            Only affects Kubernetes charms on Juju 3.6.0 or later. If not specified,
+            Juju will use
+            `its default behaviour <https://juju.is/docs/sdk/metadata-yaml#heading--charm-user>`_.
+            """
+        ),
+    )
+    containers: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Define a map of containers to be created adjacent to the charm (as a
+            sidecar, in the same pod).
+
+            This is required for Kubernetes charms.
+
+            This key consists of a dictionary mapping container names to their
+            specifications. Each container can be specified in terms of ``resource``,
+            ``bases`` and ``mounts``, where one of either the ``resource`` or the
+            ``bases`` subkeys must be defined and ``mounts`` is optional.
+
+            - ``resource`` is the name of an OCI image resource used to create the
+              container (that you will then define further in the resources block).
+            - ``bases`` is a list of bases to be used for resolving a container image,
+              in descending order of preference. To use it, specify a base name (for
+              example, ``ubuntu`` or ``centos``), a ``channel`` and an
+              ``architecture``.
+            - ``mounts`` is a list of mounted storage volumes for this container. To
+              use it, specify the name of the storage to mount from the charm
+              storage and, optionally, the location where to mount the storage.
+
+            Structure::
+
+                containers:
+                  <container name>:
+                    resource: <resource name>
+                    bases:
+                      - name: <base name>
+                        channel: <track[/risk][/branch]>
+                        architectures:
+                          - <architecture>
+                    mounts:
+                      - storage: <storage name>
+                        location: <path>"""
+        ),
+        examples=[
+            {
+                "super-app": {
+                    "resource": "super-app-image",
+                    "mounts": [{"storage": "logs", "location": "/logs"}],
+                }
+            }
+        ],
+    )
+    devices: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Devices the charm needs.
+
+            Structure::
+
+                devices:
+                  <device name>:
+                    type: gpu | nvidia.com/gpu | amd.com/gpu
+                    description: <Optional description>
+                    countmin: <Optional minimum number requested>
+                    countmax: <Optional maximum number requested>"""
+        ),
+        examples=[
+            {
+                "amd-gpu": {
+                    "type": "amd.com/gpu",
+                    "description": "Some sweet AMD GPU",
+                    "countmin": 1,
+                    "countmax": 100,
+                },
+                "nvidia-gpu": {
+                    "type": "nvidia.com/gpu",
+                    "description": "Some NVIDIA GPUs",
+                    "countmin": 20,
+                },
+            },
+            {
+                "gpus": {
+                    "type": "gpu",
+                    "description": "A bunch of GPUs",
+                    "countmin": 2,
+                    "countmax": 40,
+                }
+            },
+        ],
+    )
+    extra_bindings: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description="A key-only mapping representing extra bindings needed.",
+    )
+    peers: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            A map of peer relations.
+
+            Structure::
+
+                peers:
+                  <endpoint name>:
+                    interface: <Required interface name>
+                    limit: <Optional: maximum number of supported connections
+                    optional: <Informational only - whether the relation is required.>
+                    scope: <"global" or "container" - the relation scope.>
+
+            For more information, see
+            `the Juju documentation <https://juju.is/docs/juju/relation>`_."""
+        ),
+        examples=[
+            {
+                "friend": {
+                    "interface": "life",
+                    "limit": 150,
+                    "optional": True,
+                    "scope": "container",
+                }
+            }
+        ],
+    )
+    provides: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            A map of interfaces this charm provides.
+
+            Structure::
+
+                provides:
+                  <endpoint name>:
+                    interface: <Required interface name>
+                    limit: <Optional: maximum number of supported connections
+                    optional: <Informational only - whether the relation is required.>
+                    scope: <"global" or "container" - the relation scope.>
+
+            For more information, see
+            `the Juju documentation <https://juju.is/docs/juju/relation>`_."""
+        ),
+        examples=[{"self": {"interface": "identity"}}],
+    )
+    requires: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            A map of relations this charm requires.
+
+            Structure::
+
+                requires:
+                  <endpoint name>:
+                    interface: <Required interface name>
+                    limit: <Optional: maximum number of supported connections
+                    optional: <Informational only - whether the relation is required.>
+                    scope: <"global" or "container" - the relation scope.>
+
+            For more information, see
+            `the Juju documentation <https://juju.is/docs/juju/relation>`_."""
+        ),
+        examples=[
+            {
+                "parent": {
+                    "interface": "birth",
+                    "limit": 2,
+                    "optional": False,
+                    "scope": "global",
+                }
+            }
+        ],
+    )
+    resources: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            A mapping of resources that accompany the charm.
+
+            See first: `Juju | Charm resource <https://juju.is/docs/juju/charm-resource>`_
+
+            Each resource is made available when the charm is deployed. NOTE:
+            Kubernetes charms must declare an ``oci-image`` type resource for each
+            container declared in ``containers``.
+
+            Structure::
+
+                # (Optional) Additional resources that accompany the charm
+                resources:
+                  <resource name>:
+                    # (Required) The type of the resource
+                    type: file | oci-image
+
+                    # (Optional) Description of the resource and its purpose
+                    description: <description>
+
+                    # (Required: when type:file) The filename of the resource as it
+                    # should appear in the filesystem.
+                    filename: <filename>"""
+        ),
+        examples=[
+            {"water": {"type": "file", "filename": "/dev/h2o"}},
+            {"super-app-image": {"type": "oci-image", "description": "My app!"}},
+        ],
+    )
+    storage: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            Storage devices requested by the charm.
+
+            Structure::
+
+                storage:
+                  # Each key represents the name of the storage
+                  <storage name>:
+
+                    # (Required) Type of the requested storage
+                    type: filesystem | block
+
+                    # (Optional) Description of the storage requested
+                    description: <description>
+
+                    # (Optional) The mount location for filesystem stores. For
+                    # multi-stores the location acts as the parent directory for each
+                    # mounted store.
+                    location: <location>
+
+                    # Indicates if the storage should be made read-only (where
+                    # possible). Defaults to false
+                    read-only: true | false
+
+                    # (Optional) The number of storage instances to be requested
+                    multiple:
+                      range: <n> | <n>-<m> | <n>- | <n>+
+
+                    # (Optional) Minimum size of requested storage in forms G, GiB, GB.
+                    # Size multipliers are M, G, T, P, E, Z or Y. With no multiplier
+                    # supplied, M is implied.
+                    minimum-size: <n> | <n><multiplier>
+
+                    # (Optional) List of properties, only supported value is "transient"
+                    properties:
+                      - transient
+            """
+        ),
+        examples=[
+            {
+                "jbod": {
+                    "type": "block",
+                    "description": "A block storage to use as swap space",
+                    "properties": ["transient"],
+                },
+            },
+        ],
+    )
+    subordinate: bool | None = pydantic.Field(
+        default=None,
+        description="Optional boolean to declare the charm subordinate.",
+        examples=[True],
+    )
+    terms: list[str] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            A list of terms to which the user agree by using the charm.
+            These terms are not enforced by the charm, Juju or Canonical."""
+        ),
+        examples=[
+            "Post cat pictures on Mastodon",
+            "Tag your cat pictures with #caturday",
+        ],
+    )
+    links: Links | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            (Recommended) Links to various additional information used by Charmhub."""
+        ),
+        examples=[
+            {
+                "contact": "Please send your answer to Old Pink, care of the Funny Farm, Chalfont",
+                "documentation": "https://discourse.charmhub.io/t/traefik-k8s-docs-index/10778",
+                "issues": "https://github.com/canonical/traefik-k8s-operator/issues",
+                "source": "https://github.com/canonical/traefik-k8s-operator",
+                "website": "https://charmed-kubeflow.io/",
+            }
+        ],
+    )
+    config: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=textwrap.dedent(
+            """\
+            One or more configuration options for your charm.
+
+            Structure::
+
+                config:
+                  options:
+                    # Each option name is the name by which the charm will query the option.
+                    <option name>:
+                      # (Required) The type of the option
+                      type: string | int | float | boolean | secret
+                      # (Optional) The default value of the option
+                      default: <a reasonable default value of the same type as the option>
+                      # (Optional): A string describing the option. Also appears on charmhub.io
+                      description: <description string>"""
+        ),
+        examples=[
+            {
+                "options": {
+                    "name": {
+                        "default": "Wiki",
+                        "description": "The name or title of the Wiki",
+                        "type": "string",
+                    },
+                    "skin": {
+                        "default": "vector",
+                        "description": "Skin to use for the wiki",
+                        "type": "string",
+                    },
+                },
+            },
+        ],
+    )
+
+
+def _check_base_is_legacy(base: charmcraft.BaseDict) -> bool:
+    """Check that the given base is a legacy base, usable with 'bases'."""
+    # This pyright ignore can go away once we're on Python minimum version 3.11.
+    # At that point we can mark items as required or not required.
+    # https://docs.python.org/3/library/typing.html#typing.Required
+    if (
+        base["name"] == "ubuntu"  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        and base["channel"] < "24.04"  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    ):
+        return True
+    return base in (
+        {"name": "centos", "channel": "7"},
+        {"name": "almalinux", "channel": "9"},
+    )
+
+
+def _validate_base(
+    base: charmcraft.BaseDict | charmcraft.LongFormBasesDict,
+) -> charmcraft.LongFormBasesDict:
+    if "name" in base:  # Convert short form to long form
+        base = cast(
+            charmcraft.LongFormBasesDict, {"build-on": [base], "run-on": [base]}
+        )
+    else:  # Cast to long form since we know it is one.
+        base = cast(charmcraft.LongFormBasesDict, base)
+
+    # Ensure we're only allowing legacy bases.
+    for build_base in base["build-on"]:
+        if not _check_base_is_legacy(build_base):
+            raise ValueError(f"Base requires 'platforms' definition: {build_base}")
+    for run_base in base["run-on"]:
+        if not _check_base_is_legacy(run_base):
+            raise ValueError(f"Base requires 'platforms' definition: {run_base}")
+    return base
+
+
+class BasesCharm(CharmProject):
+    """A charm using the deprecated ``bases`` keyword.
+
+    This type of charm only supports the following bases:
+        - Ubuntu 18.04
+        - Ubuntu 20.04
+        - Ubuntu 22.04
+        - CentOS 7
+        - Alma Linux 9
+    """
+
+    platforms: None = None  # type: ignore[assignment]
 
     # This is defined this way because using conlist makes mypy sad and using
-    # a ConstrainedList child class has pydontic issues. This appears to be
+    # a ConstrainedList child class has pydantic issues. This appears to be
     # solved with Pydantic 2.
-    bases: list[BasesConfiguration] = pydantic.Field(min_items=1)
+    bases: list[
+        Annotated[BasesConfiguration, pydantic.BeforeValidator(_validate_base)]
+    ] = pydantic.Field(min_length=1)
 
     base: None = None
 
-    parts: dict[str, dict[str, Any]] = {"charm": {"plugin": "charm", "source": "."}}
+    parts: dict[str, dict[str, Any]] = pydantic.Field(
+        default={"charm": {"plugin": "charm", "source": "."}},
+        description=textwrap.dedent(
+            """\
+            Configures the various mechanisms to obtain, process and prepare data from
+            different sources that end up being a part of the final charm.
 
-    actions: dict[str, Any] | None
-    assumes: list[str | dict[str, list | dict]] | None
-    containers: dict[str, Any] | None
-    devices: dict[str, Any] | None
-    extra_bindings: dict[str, Any] | None
-    peers: dict[str, Any] | None
-    provides: dict[str, Any] | None
-    requires: dict[str, Any] | None
-    resources: dict[str, Any] | None
-    storage: dict[str, Any] | None
-    subordinate: bool | None
-    terms: list[str] | None
-    links: Links | None
-    config: dict[str, Any] | None
+            Keys are user-defined part names. The value of each key is a map where keys
+            are part names. Charmcraft provides 3 plugins: charm, bundle, reactive.
 
-    @pydantic.validator("bases", pre=True, each_item=True, allow_reuse=True)
-    def _validate_base(cls, base: BaseDict | LongFormBasesDict) -> LongFormBasesDict:
-        """Expand short-form bases into long-form bases."""
-        if "name" in base:  # Convert short form to long form
-            base = cast(LongFormBasesDict, {"build-on": [base], "run-on": [base]})
-        else:  # Cast to long form since we know it is one.
-            base = cast(LongFormBasesDict, base)
+            Example::
 
-        # Ensure we're only allowing legacy bases.
-        for build_base in base["build-on"]:
-            if not cls._check_base_is_legacy(build_base):
-                raise ValueError(f"Base requires 'platforms' definition: {build_base}")
-        for run_base in base["run-on"]:
-            if not cls._check_base_is_legacy(run_base):
-                raise ValueError(f"Base requires 'platforms' definition: {run_base}")
-
-        return base
-
-    @staticmethod
-    def _check_base_is_legacy(base: BaseDict) -> bool:
-        """Check that the given base is a legacy base, usable with 'bases'."""
-        # This pyright ignore can go away once we're on Python minimum version 3.11.
-        # At that point we can mark items as required or not required.
-        # https://docs.python.org/3/library/typing.html#typing.Required
-        if (
-            base["name"] == "ubuntu"  # pyright: ignore[reportTypedDictNotRequiredAccess]
-            and base["channel"] < "24.04"  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        ):
-            return True
-        if base in ({"name": "centos", "channel": "7"}, {"name": "almalinux", "channel": "9"}):
-            return True
-        return False
+                parts:
+                  libs:
+                    plugin: dump
+                    source: /usr/local/lib/
+                    organize:
+                      "libxxx.so*": lib/
+                    prime:
+                      - lib/""",
+        ),
+    )
 
 
-class PlatformCharm(CharmcraftProject):
+class PlatformCharm(CharmProject):
     """Model for defining a charm using Platforms."""
 
-    type: Literal["charm"]
-    name: models.ProjectName
-    summary: CharmcraftSummaryStr
-    description: str
-
-    base: BaseStr
+    # Silencing pyright because it complains about missing default value
+    base: BaseStr | None = None
     build_base: BuildBaseStr | None = None
-    platforms: dict[str, Platform | None]
+    platforms: dict[str, models.Platform | None]  # type: ignore[assignment]
 
-    parts: dict[str, dict[str, Any]]  # craft-parts parts
+    parts: dict[str, dict[str, Any]] = pydantic.Field(
+        description=textwrap.dedent(
+            """\
+            Configures the various mechanisms to obtain, process and prepare data from
+            different sources that end up being a part of the final charm.
 
-    actions: dict[str, Any] | None
-    assumes: list[str | dict[str, list | dict]] | None
-    containers: dict[str, Any] | None
-    devices: dict[str, Any] | None
-    extra_bindings: dict[str, Any] | None
-    peers: dict[str, Any] | None
-    provides: dict[str, Any] | None
-    requires: dict[str, Any] | None
-    resources: dict[str, Any] | None
-    storage: dict[str, Any] | None
-    subordinate: bool | None
-    terms: list[str] | None
-    links: Links | None
-    config: dict[str, Any] | None
+            Keys are user-defined part names. The value of each key is a map where keys
+            are part names. Charmcraft provides 3 plugins: charm, bundle, reactive.
 
-    @staticmethod
-    def _check_base_is_legacy(base: BaseDict) -> bool:
-        """Check that the given base is a legacy base, usable with 'bases'."""
-        # This pyright ignore can go away once we're on Python minimum version 3.11.
-        # At that point we can mark items as required or not required.
-        # https://docs.python.org/3/library/typing.html#typing.Required
-        if (
-            base["name"] == "ubuntu"  # pyright: ignore[reportTypedDictNotRequiredAccess]
-            and base["channel"] < "24.04"  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        ):
-            return True
-        if base in ({"name": "centos", "channel": "7"}, {"name": "almalinux", "channel": "9"}):
-            return True
-        return False
+            Example::
 
-    @pydantic.validator("build_base", always=True)
-    def _validate_dev_base_needs_build_base(
-        cls, build_base: str | None, values: dict[str, Any]
-    ) -> str | None:
-        if not build_base and (base := values["base"]) in const.DEVEL_BASE_STRINGS:
+                parts:
+                  libs:
+                    plugin: dump
+                    source: /usr/local/lib/
+                    organize:
+                      "libxxx.so*": lib/
+                    prime:
+                      - lib/""",
+        ),
+        min_length=1,
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_dev_base_needs_build_base(self) -> Self:
+        if not self.build_base and self.base in const.DEVEL_BASE_STRINGS:
             raise ValueError(
-                f"Base {base} requires a build-base (recommended: 'build-base: ubuntu@devel')"
+                f"Base {self.base} requires a build-base (recommended: 'build-base: ubuntu@devel')"
             )
-        return build_base
+        return self
+
+    @override
+    @pydantic.field_validator("platforms", mode="before")
+    @classmethod
+    def _populate_platforms(cls, platforms: dict[str, Any]) -> dict[str, Any]:
+        """Overrides the validator to prevent platforms from being modified.
+
+        Modifying the platforms field can break multi-base builds."""
+        return platforms
 
 
-Charm = BasesCharm | PlatformCharm
+Charm = PlatformCharm | BasesCharm
 
 
 class Bundle(CharmcraftProject):
@@ -696,14 +1119,23 @@ class Bundle(CharmcraftProject):
     type: Literal["bundle"]
     bundle: dict[str, Any] = {}
     name: models.ProjectName | None = None  # type: ignore[assignment]
-    title: models.ProjectTitle | None
-    summary: CharmcraftSummaryStr | None
-    description: pydantic.StrictStr | None
-    charmhub: CharmhubConfig = CharmhubConfig()
+    title: models.ProjectTitle | None = None
+    summary: CharmcraftSummaryStr | None = None
+    description: pydantic.StrictStr | None = None
+    platforms: None = None  # type: ignore[assignment]
 
-    @pydantic.root_validator(pre=True)
+    parts: dict[str, dict[str, Any]] = pydantic.Field(
+        default_factory=lambda: {"bundle": {"plugin": "bundle", "source": "."}}
+    )
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
     def preprocess_bundle(cls, values: dict[str, Any]) -> dict[str, Any]:
         """Preprocess any values that charmcraft infers, before attribute validation."""
+        emit.progress(
+            "Packing bundles is deprecated and will be removed in Charmcraft 4.",
+            permanent=True,
+        )
         if "name" not in values:
             values["name"] = values.get("bundle", {}).get("name")
 

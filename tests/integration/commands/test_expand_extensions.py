@@ -1,4 +1,4 @@
-# Copyright 2023 Canonical Ltd.
+# Copyright 2023,2025 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 # For further info, check https://github.com/canonical/charmcraft
+import platform
 import sys
 from textwrap import dedent
 from typing import Any
@@ -36,15 +37,19 @@ class TestExtension(FakeExtension):
         return {"terms": ["https://example.com/test"]}
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_extensions(stub_extensions):
     extensions.register(TestExtension.name, TestExtension)
 
 
+@pytest.mark.xfail(
+    platform.system() == "Windows" and sys.version_info < (3, 11),
+    reason="'os' module doesn't have EX_OK on Windows until 3.11",
+)
 @pytest.mark.parametrize(
     ("charmcraft_yaml", "expected"),
     [
-        (
+        pytest.param(
             dedent(
                 f"""
                 name: test-charm-name
@@ -55,6 +60,9 @@ def fake_extensions(stub_extensions):
                 base: ubuntu@22.04
                 platforms:
                   amd64:
+                parts:
+                  my-part:
+                    plugin: nil
                 """
             ),
             dedent(
@@ -65,13 +73,52 @@ def fake_extensions(stub_extensions):
                 base: ubuntu@22.04
                 platforms:
                   amd64: null
-                parts: {}
+                parts:
+                  my-part:
+                    plugin: nil
                 type: charm
                 terms:
                 - https://example.com/test
                 """
             ),
-        )
+            id="platforms",
+        ),
+        pytest.param(
+            dedent(
+                f"""
+                name: test-charm-name
+                type: charm
+                summary: test-summary
+                description: test-description
+                extensions: [{TestExtension.name}]
+                bases:
+                  - name: ubuntu
+                    channel: "22.04"
+                """
+            ),
+            dedent(
+                """\
+                name: test-charm-name
+                summary: test-summary
+                description: test-description
+                parts:
+                  charm:
+                    plugin: charm
+                    source: .
+                type: charm
+                terms:
+                - https://example.com/test
+                bases:
+                - build-on:
+                  - name: ubuntu
+                    channel: '22.04'
+                  run-on:
+                  - name: ubuntu
+                    channel: '22.04'
+                """
+            ),
+            id="bases",
+        ),
     ],
 )
 def test_expand_extensions_simple(

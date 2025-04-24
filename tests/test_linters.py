@@ -25,10 +25,7 @@ import pytest
 
 from charmcraft import const
 from charmcraft.linters import (
-    CHECKERS,
     AdditionalFiles,
-    BaseChecker,
-    CheckType,
     Entrypoint,
     Framework,
     JujuActions,
@@ -36,7 +33,7 @@ from charmcraft.linters import (
     JujuMetadata,
     Language,
     NamingConventions,
-    analyze,
+    OpsMainCall,
     check_dispatch_with_python_entrypoint,
     get_entrypoint_from_dispatch,
 )
@@ -79,7 +76,7 @@ def test_epfromdispatch_inaccessible_dispatch(tmp_path):
 def test_epfromdispatch_broken_dispatch(tmp_path):
     """The charm has a dispatch which we can't decode."""
     dispatch = tmp_path / const.DISPATCH_FILENAME
-    dispatch.write_bytes(b"\xC0\xC0")
+    dispatch.write_bytes(b"\xc0\xc0")
     result = get_entrypoint_from_dispatch(tmp_path)
     assert result is None
 
@@ -96,7 +93,9 @@ def test_checkdispatchpython_python_ok(tmp_path):
     """The charm is written in Python."""
     entrypoint = tmp_path / "charm.py"
     entrypoint.touch(mode=0o700)
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = check_dispatch_with_python_entrypoint(tmp_path)
     assert result == entrypoint
 
@@ -104,7 +103,9 @@ def test_checkdispatchpython_python_ok(tmp_path):
 def test_checkdispatchpython_no_entrypoint(tmp_path):
     """Cannot find the entrypoint used in dispatch."""
     entrypoint = tmp_path / "charm.py"
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = check_dispatch_with_python_entrypoint(tmp_path)
     assert result is None
 
@@ -127,7 +128,9 @@ def test_checkdispatchpython_entrypoint_is_not_python(tmp_path):
     )
     entrypoint = tmp_path / "charm"
     entrypoint.touch(mode=0o700)
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = check_dispatch_with_python_entrypoint(tmp_path)
     assert result is None
 
@@ -139,7 +142,9 @@ def test_checkdispatchpython_entrypoint_no_exec(tmp_path):
     dispatch.write_text(EXAMPLE_DISPATCH)
     entrypoint = tmp_path / "charm.py"
     entrypoint.touch()
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = check_dispatch_with_python_entrypoint(tmp_path)
     assert result is None
 
@@ -149,7 +154,9 @@ def test_checkdispatchpython_entrypoint_no_exec(tmp_path):
 
 def test_language_python():
     """The charm is written in Python."""
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path("entrypoint")
         result = Language().run(pathlib.Path("somedir"))
     assert result == Language.Result.PYTHON
@@ -158,7 +165,9 @@ def test_language_python():
 
 def test_language_no_dispatch(tmp_path):
     """The charm has no dispatch at all."""
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = None
         result = Language().run(pathlib.Path("somedir"))
     assert result == Language.Result.UNKNOWN
@@ -217,7 +226,9 @@ def test_framework_operator_used_ok(tmp_path, import_line):
     opsdir.mkdir(parents=True)
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is True
@@ -235,7 +246,9 @@ def test_framework_operator_language_not_python(tmp_path):
     opsdir.mkdir(parents=True)
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = None
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -248,7 +261,9 @@ def test_framework_operator_venv_directory_missing(tmp_path):
     entrypoint.write_text("import ops")
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -265,7 +280,9 @@ def test_framework_operator_no_venv_ops_directory(tmp_path):
     venvdir.mkdir()
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -283,7 +300,9 @@ def test_framework_operator_venv_ops_directory_is_not_a_dir(tmp_path):
     opsfile.touch()
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -300,7 +319,9 @@ def test_framework_operator_corrupted_entrypoint(tmp_path):
     opsdir.mkdir(parents=True)
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -326,7 +347,9 @@ def test_framework_operator_no_ops_imported(tmp_path, monkeypatch, import_line):
     opsdir.mkdir(parents=True)
 
     # check
-    with patch("charmcraft.linters.check_dispatch_with_python_entrypoint") as mock_check:
+    with patch(
+        "charmcraft.linters.check_dispatch_with_python_entrypoint"
+    ) as mock_check:
         mock_check.return_value = pathlib.Path(entrypoint)
         result = Framework()._check_operator(tmp_path)
     assert result is False
@@ -671,218 +694,6 @@ def test_jujumetadata_series_is_deprecated(tmp_path):
     )
 
 
-# --- tests for analyze function
-
-
-def create_fake_checker(**kwargs):
-    """Create a fake Checker.
-
-    Receive generic kwargs and process them as a dict for the defaults, as we can't declare
-    the name in the function definition and then use it in the class definition.
-    """
-    params = {
-        "check_type": "type",
-        "name": "name",
-        "url": "url",
-        "text": "text",
-        "result": "result",
-    }
-    params.update(kwargs)
-
-    class FakeChecker(BaseChecker):
-        check_type = params["check_type"]
-        name = params["name"]
-        url = params["url"]
-        text = params["text"]
-
-        def run(self, basedir):
-            return params["result"]
-
-    return FakeChecker
-
-
-def test_analyze_run_everything(config):
-    """Check that analyze runs all and collect the results."""
-    FakeChecker1 = create_fake_checker(
-        check_type=CheckType.ATTRIBUTE, name="name1", url="url1", text="text1", result="result1"
-    )
-    FakeChecker2 = create_fake_checker(
-        check_type=CheckType.LINT, name="name2", url="url2", text="text2", result="result2"
-    )
-    FakeChecker3 = create_fake_checker(
-        check_type=CheckType.LINT, name="returns_none", url="url3", text=None, result="result3"
-    )
-
-    # hack the first fake checker to validate that it receives the indicated path
-    def dir_validator(self, basedir):
-        assert basedir == pathlib.Path("test-buildpath")
-        return "result1"
-
-    FakeChecker1.run = dir_validator
-
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker1, FakeChecker2, FakeChecker3]):
-        result = analyze(config, pathlib.Path("test-buildpath"))
-
-    r1, r2, r3 = result
-    assert r1.check_type == "attribute"
-    assert r1.name == "name1"
-    assert r1.url == "url1"
-    assert r1.text == "text1"
-    assert r1.result == "result1"
-    assert r2.check_type == "lint"
-    assert r2.name == "name2"
-    assert r2.url == "url2"
-    assert r2.text == "text2"
-    assert r2.result == "result2"
-    assert r3.name == "returns_none"
-    assert r3.url == "url3"
-    assert r3.text == "n/a"
-    assert r3.result == "result3"
-
-
-def test_analyze_ignore_attribute(config):
-    """Run all checkers except the ignored attribute."""
-    FakeChecker1 = create_fake_checker(
-        check_type=CheckType.ATTRIBUTE,
-        name="name1",
-        result="res1",
-        text="text1",
-        url="url1",
-    )
-    FakeChecker2 = create_fake_checker(
-        check_type=CheckType.LINT,
-        name="name2",
-        result="res2",
-        text="text2",
-        url="url2",
-    )
-
-    config.analysis.ignore.attributes.append("name1")
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker1, FakeChecker2]):
-        result = analyze(config, pathlib.Path("somepath"))
-
-    res1, res2 = result
-    assert res1.check_type == CheckType.ATTRIBUTE
-    assert res1.name == "name1"
-    assert res1.result == LintResult.IGNORED
-    assert res1.text == ""
-    assert res1.url == "url1"
-    assert res2.check_type == CheckType.LINT
-    assert res2.name == "name2"
-    assert res2.result == "res2"
-    assert res2.text == "text2"
-    assert res2.url == "url2"
-
-
-def test_analyze_ignore_linter(config):
-    """Run all checkers except the ignored linter."""
-    FakeChecker1 = create_fake_checker(
-        check_type=CheckType.ATTRIBUTE,
-        name="name1",
-        result="res1",
-        text="text1",
-        url="url1",
-    )
-    FakeChecker2 = create_fake_checker(
-        check_type=CheckType.LINT,
-        name="name2",
-        result="res2",
-        text="text2",
-        url="url2",
-    )
-
-    config.analysis.ignore.linters.append("name2")
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker1, FakeChecker2]):
-        result = analyze(config, pathlib.Path("somepath"))
-
-    res1, res2 = result
-    assert res1.check_type == CheckType.ATTRIBUTE
-    assert res1.name == "name1"
-    assert res1.result == "res1"
-    assert res1.text == "text1"
-    assert res1.url == "url1"
-    assert res2.check_type == CheckType.LINT
-    assert res2.name == "name2"
-    assert res2.result == LintResult.IGNORED
-    assert res2.text == ""
-    assert res2.url == "url2"
-
-
-def test_analyze_override_ignore(config):
-    """Run all checkers even the ignored ones, if requested."""
-    FakeChecker1 = create_fake_checker(check_type=CheckType.ATTRIBUTE, name="name1", result="res1")
-    FakeChecker2 = create_fake_checker(check_type=CheckType.LINT, name="name2", result="res2")
-
-    config.analysis.ignore.attributes.append("name1")
-    config.analysis.ignore.linters.append("name2")
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker1, FakeChecker2]):
-        result = analyze(config, pathlib.Path("somepath"), override_ignore_config=True)
-
-    res1, res2 = result
-    assert res1.check_type == CheckType.ATTRIBUTE
-    assert res1.name == "name1"
-    assert res1.result == "res1"
-    assert res2.check_type == CheckType.LINT
-    assert res2.name == "name2"
-    assert res2.result == "res2"
-
-
-def test_analyze_crash_attribute(config):
-    """The attribute checker crashes."""
-    FakeChecker = create_fake_checker(
-        check_type=CheckType.ATTRIBUTE, name="name", text="text", url="url"
-    )
-
-    def raises(*a):
-        raise ValueError
-
-    FakeChecker.run = raises
-
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker]):
-        result = analyze(config, pathlib.Path("somepath"))
-
-    (res,) = result
-    assert res.check_type == CheckType.ATTRIBUTE
-    assert res.name == "name"
-    assert res.result == LintResult.UNKNOWN
-    assert res.text == "text"
-    assert res.url == "url"
-
-
-def test_analyze_crash_lint(config):
-    """The lint checker crashes."""
-    FakeChecker = create_fake_checker(
-        check_type=CheckType.LINT, name="name", text="text", url="url"
-    )
-
-    def raises(*a):
-        raise ValueError
-
-    FakeChecker.run = raises
-
-    with patch("charmcraft.linters.CHECKERS", [FakeChecker]):
-        result = analyze(config, pathlib.Path("somepath"))
-
-    (res,) = result
-    assert res.check_type == CheckType.LINT
-    assert res.name == "name"
-    assert res.result == LintResult.FATAL
-    assert res.text == "text"
-    assert res.url == "url"
-
-
-def test_analyze_all_can_be_ignored(config):
-    """Control that all real life checkers can be ignored."""
-    config.analysis.ignore.attributes.extend(
-        c.name for c in CHECKERS if c.check_type == CheckType.ATTRIBUTE
-    )
-    config.analysis.ignore.linters.extend(
-        c.name for c in CHECKERS if c.check_type == CheckType.LINT
-    )
-    result = analyze(config, pathlib.Path("somepath"))
-    assert all(r.result == LintResult.IGNORED for r in result)
-
-
 # --- tests for JujuActions checker
 
 
@@ -1059,7 +870,10 @@ def test_jujuconfig_no_type_in_options_items(tmp_path):
     linter = JujuConfig()
     result = linter.run(tmp_path)
     assert result == JujuConfig.Result.ERROR
-    assert linter.text == "Error in config.yaml: items under 'options' must have a 'type' key."
+    assert (
+        linter.text
+        == "Error in config.yaml: items under 'options' must have a 'type' key."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1161,7 +975,9 @@ def test_entrypoint_missing(tmp_path):
     """The file does not exist."""
     entrypoint = tmp_path / "charm"
     linter = Entrypoint()
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = linter.run(tmp_path)
     assert result == Entrypoint.Result.ERROR
     assert linter.text == f"Cannot find the entrypoint file: {str(entrypoint)!r}"
@@ -1172,7 +988,9 @@ def test_entrypoint_directory(tmp_path):
     entrypoint = tmp_path / "charm"
     entrypoint.mkdir()
     linter = Entrypoint()
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = linter.run(tmp_path)
     assert result == Entrypoint.Result.ERROR
     assert linter.text == f"The entrypoint is not a file: {str(entrypoint)!r}"
@@ -1184,7 +1002,9 @@ def test_entrypoint_non_exec(tmp_path):
     entrypoint = tmp_path / "charm"
     entrypoint.touch()
     linter = Entrypoint()
-    with patch("charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint):
+    with patch(
+        "charmcraft.linters.get_entrypoint_from_dispatch", return_value=entrypoint
+    ):
         result = linter.run(tmp_path)
     assert result == Entrypoint.Result.ERROR
     assert linter.text == f"The entrypoint file is not executable: {str(entrypoint)!r}"
@@ -1245,7 +1065,10 @@ def test_additional_files_checker_not_applicable(tmp_path):
     result = linter.run(prime_dir)
 
     assert result == LintResult.NONAPPLICABLE
-    assert linter.text == "Additional files check not applicable without a build environment."
+    assert (
+        linter.text
+        == "Additional files check not applicable without a build environment."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1282,3 +1105,149 @@ def test_additional_files_checker_generated_ignore(tmp_path, file):
 
     assert result == LintResult.OK
     assert linter.text == "No additional files found in the charm."
+
+
+CODE_SAMPLES = {
+    "canonical example": dedent(
+        """
+        import ops
+        if __name__ == "__main__":
+            ops.main(SomeCharm)
+        """
+    ),
+    "recommended import style": dedent(
+        """
+        import ops
+        ops.main(SomeCharm)
+        """
+    ),
+    "recommended import style, legacy call": dedent(
+        """
+        import ops
+        ops.main.main(SomeCharm)
+        """
+    ),
+    "call with kwarg": dedent(
+        """
+        import ops
+        ops.main(charm_class=SomeCharm)
+        """
+    ),
+    "import side effect": dedent(
+        """
+        import ops.charm  # makes `ops` visible
+        ops.main(SomeCharm)
+        """
+    ),
+    "import alias": dedent(
+        """
+        import ops as mops
+        mops.main(SomeCharm)
+        """
+    ),
+    "function import": dedent(
+        """
+        from ops import main
+        main(SomeCharm)
+        """
+    ),
+    "function import, legacy call": dedent(
+        """
+        from ops import main
+        main.main(SomeCharm)
+        """
+    ),
+    "submodule import": dedent(
+        """
+        import ops.main
+        ops.main(SomeCharm)  # type: ignore
+        """
+    ),
+    "submodule import, legacy call": dedent(
+        """
+        import ops.main
+        ops.main.main(SomeCharm)
+        """
+    ),
+    "multiple imports, simple": dedent(
+        """
+        import ops
+        import ops.main
+        ops.main(SomeCharm)
+        """
+    ),
+    "multiple imports, earlier": dedent(
+        """
+        import ops
+        from ops.main import main
+        ops.main(SomeCharm)
+        """
+    ),
+    "multiple imports, latter": dedent(
+        """
+        import ops
+        from ops.main import main
+        main(SomeCharm)
+        """
+    ),
+    "function import from submodule": dedent(
+        """
+        from ops.main import main
+        main(SomeCharm)
+        """
+    ),
+    "function alias import from submodule": dedent(
+        """
+        from ops.main import main as alias
+        alias(SomeCharm)
+        """
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [pytest.param(v, id=k) for k, v in CODE_SAMPLES.items()],
+)
+def test_ops_main(code: str):
+    assert OpsMainCall()._check_main_calls(code)
+
+
+NEGATIVE_CODE_SAMPLES = {
+    "missing ops import": dedent(
+        """
+        ops.main(SomeCharm)
+        """
+    ),
+    "missing main call": dedent(
+        """
+        import ops
+        """
+    ),
+    "wrong import alias": dedent(
+        """
+        import ops as oops
+        ops.main(SomeCharm)
+        """
+    ),
+    "no side effect from an alias": dedent(
+        """
+        import ops.charm as the_charm
+        ops.main(SomeCharm)
+        """
+    ),
+    "wrong function alias import from submodule": dedent(
+        """
+        from ops.main import main as whatchamacallit
+        main(SomeCharm)
+        """
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [pytest.param(v, id=k) for k, v in NEGATIVE_CODE_SAMPLES.items()],
+)
+def test_ops_main_negative(code: str):
+    assert not OpsMainCall()._check_main_calls(code)

@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """CLI-related utilities for Charmcraft."""
+
 import datetime
 import enum
 import json
@@ -21,7 +22,7 @@ import numbers
 import sys
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import Any, overload
 
 import tabulate
 from craft_cli import emit
@@ -80,9 +81,7 @@ class ResourceOption:
             else:
                 if revision >= 0:
                     return ResourceOption(name, revision)
-        msg = (
-            "the resource format must be <name>:<revision> (revision being a non-negative integer)"
-        )
+        msg = "the resource format must be <name>:<revision> (revision being a non-negative integer)"
         raise ValueError(msg)
 
 
@@ -182,7 +181,9 @@ class OutputFormat(enum.Enum):
 
 
 @overload
-def format_content(content: dict[str, str], fmt: Literal[OutputFormat.TABLE, "table"]) -> str: ...
+def format_content(
+    content: dict[str, Any] | list[dict[str, Any]], fmt: OutputFormat | str | None
+) -> str: ...
 
 
 @overload

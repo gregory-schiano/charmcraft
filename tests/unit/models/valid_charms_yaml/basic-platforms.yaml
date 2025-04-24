@@ -8,4 +8,8 @@ base:
   "ubuntu@22.04"
 platforms:
   amd64:
-parts: {}
+    build-on: [amd64]
+    build-for: [amd64]
+parts:
+  my-part:
+    plugin: nil

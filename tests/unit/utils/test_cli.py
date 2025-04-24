@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Unit tests for CLI-related utilities."""
+
 import datetime
 import json
 from unittest.mock import call, patch
@@ -47,19 +48,19 @@ COMPOUND_DICTS_STRATEGY = strategies.dictionaries(
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_isatty():
     with patch("sys.stdin.isatty", return_value=True) as mock_isatty:
         yield mock_isatty
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_input():
     with patch("charmcraft.utils.cli.input", return_value="") as mock_input:
         yield mock_input
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_is_charmcraft_running_in_managed_mode():
     with patch(
         "charmcraft.utils.cli.is_charmcraft_running_in_managed_mode", return_value=False
@@ -171,7 +172,9 @@ def test_confirm_with_user(user_input, expected, mock_input, mock_isatty):
     assert mock_input.mock_calls == [call("prompt [y/N]: ")]
 
 
-def test_confirm_with_user_errors_in_managed_mode(mock_is_charmcraft_running_in_managed_mode):
+def test_confirm_with_user_errors_in_managed_mode(
+    mock_is_charmcraft_running_in_managed_mode,
+):
     mock_is_charmcraft_running_in_managed_mode.return_value = True
 
     with pytest.raises(RuntimeError):

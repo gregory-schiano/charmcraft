@@ -15,9 +15,9 @@
 # For further info, check https://github.com/canonical/charmcraft
 
 """Service class for packing."""
+
 from __future__ import annotations
 
-import itertools
 import json
 import os
 import pathlib
@@ -26,10 +26,10 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
 import craft_application
+import craft_platforms
 import yaml
 from craft_application import services
 from craft_cli import emit
-from craft_providers import bases
 
 import charmcraft
 from charmcraft import const, errors, models, utils
@@ -64,7 +64,9 @@ class PackageService(services.PackageService):
         project_dir: pathlib.Path,
         build_plan: list[craft_application.models.BuildInfo],
     ) -> None:
-        super().__init__(app, services, project=cast(craft_application.models.Project, project))
+        super().__init__(
+            app, services, project=cast(craft_application.models.Project, project)
+        )
         self.project_dir = project_dir.resolve(strict=True)
         self._platform = build_plan[0].platform
         self._build_plan = build_plan
@@ -96,7 +98,9 @@ class PackageService(services.PackageService):
         with packages_file.open("at") as file:
             file.writelines(f"{package.name}\n" for package in packages)
 
-    def pack_bundle(self, prime_dir: pathlib.Path, dest_dir: pathlib.Path) -> pathlib.Path:
+    def pack_bundle(
+        self, prime_dir: pathlib.Path, dest_dir: pathlib.Path
+    ) -> pathlib.Path:
         """Pack a prime directory as a bundle."""
         name = self._project.name or "bundle"
         bundle_path = dest_dir / f"{name}.zip"
@@ -104,7 +108,9 @@ class PackageService(services.PackageService):
         utils.build_zip(bundle_path, prime_dir)
         return bundle_path
 
-    def pack_charm(self, prime_dir: pathlib.Path, dest_dir: pathlib.Path) -> pathlib.Path:
+    def pack_charm(
+        self, prime_dir: pathlib.Path, dest_dir: pathlib.Path
+    ) -> pathlib.Path:
         """Pack a prime directory as a charm for a given set of bases."""
         charm_path = self.get_charm_path(dest_dir)
         emit.progress(f"Packing charm {charm_path.name}")
@@ -114,24 +120,8 @@ class PackageService(services.PackageService):
 
     def get_charm_path(self, dest_dir: pathlib.Path) -> pathlib.Path:
         """Get a charm file name for the appropriate set of run-on bases."""
-        if self._platform:
-            return dest_dir / f"{self._project.name}_{self._platform}.charm"
-        build_plan = models.CharmcraftBuildPlanner.parse_obj(
-            self._project.marshal()
-        ).get_build_plan()
-        platform = utils.get_os_platform()
-        build_on_base = bases.BaseName(name=platform.system, version=platform.release)
-        host_arch = utils.get_host_architecture()
-        for build_info in build_plan:
-            print(build_info)
-            if build_info.build_on != host_arch:
-                continue
-            if build_info.base == build_on_base:
-                return dest_dir / f"{self._project.name}_{build_info.platform}.charm"
-
-        raise errors.CraftError(
-            "Current machine is not a valid build platform for this charm.",
-        )
+        platform = self._platform.replace(":", "-")
+        return dest_dir / f"{self._project.name}_{platform}.charm"
 
     @property
     def metadata(self) -> BundleMetadata | CharmMetadata:
@@ -193,18 +183,56 @@ class PackageService(services.PackageService):
     def get_manifest_bases(self) -> list[models.Base]:
         """Get the bases used for a charm manifest from the project."""
         if isinstance(self._project, BasesCharm):
-            return list(itertools.chain.from_iterable(base.run_on for base in self._project.bases))
+            run_on_bases = []
+            for project_base in self._project.bases:
+                for build_base in project_base.build_on:
+                    if build_base.name != self._build_plan[0].base.name:
+                        continue
+                    if build_base.channel != self._build_plan[0].base.version:
+                        continue
+                    if self._build_plan[0].build_on not in build_base.architectures:
+                        continue
+                    run_on_bases.extend(project_base.run_on)
+            if not run_on_bases:
+                raise RuntimeError("Could not determine run-on bases.")
+            return run_on_bases
         if isinstance(self._project, PlatformCharm):
-            if not self._platform:
-                architectures = [utils.get_host_architecture()]
-            elif platform := self._project.platforms.get(self._platform):
-                architectures = [str(arch) for arch in platform.build_for]
-            elif self._platform in (*const.SUPPORTED_ARCHITECTURES, "all"):
-                architectures = [self._platform]
-            else:
-                architectures = [utils.get_host_architecture()]
-            return [models.Base.from_str_and_arch(self._project.base, architectures)]
-        raise TypeError(f"Unknown charm type {self._project.__class__}, cannot get bases.")
+            archs = [self._build_plan[0].build_for]
+
+            # single base recipes will have a base
+            if self._project.base:
+                return [models.Base.from_str_and_arch(self._project.base, archs)]
+
+            # multi-base recipes may have the base in the platform name
+            platform_label = self._build_plan[0].platform
+            if base := craft_platforms.parse_base_and_name(platform_label)[0]:
+                return [
+                    models.Base(
+                        name=base.distribution,
+                        channel=base.series,
+                        architectures=archs,
+                    )
+                ]
+
+            # Otherwise, retrieve the build-for base from the platform in the project.
+            # This complexity arises from building on devel bases - the BuildInfo
+            # contains the devel base and not the compatibility base.
+            platform = self._project.platforms.get(platform_label)
+            if platform and platform.build_for:
+                if base := craft_platforms.parse_base_and_architecture(
+                    platform.build_for[0]
+                )[0]:
+                    return [
+                        models.Base(
+                            name=base.distribution,
+                            channel=base.series,
+                            architectures=archs,
+                        )
+                    ]
+
+        raise TypeError(
+            f"Unknown charm type {self._project.__class__}, cannot get bases."
+        )
 
     def write_metadata(self, path: pathlib.Path) -> None:
         """Write additional charm metadata.
@@ -233,20 +261,36 @@ class PackageService(services.PackageService):
             # crystal wine glass.
             (path / "manifest.yaml").write_text(
                 utils.dump_yaml(
-                    manifest.dict(by_alias=True, exclude_unset=False, exclude_none=True)
+                    manifest.model_dump(
+                        mode="json",
+                        by_alias=True,
+                        exclude_unset=False,
+                        exclude_none=True,
+                    )
                 )
             )
 
         project_dict = self._project.marshal()
 
         # If there is a reactive part, defer to it for the existence of metadata.yaml.
-        plugins = {part.get("plugin") or name for name, part in self._project.parts.items()}
+        plugins = {
+            part.get("plugin") or name for name, part in self._project.parts.items()
+        }
+        is_reactive = "reactive" in plugins
         stage_dir = self._services.lifecycle.project_info.dirs.stage_dir
-        if "reactive" in plugins and (stage_dir / const.METADATA_FILENAME).exists():
-            emit.debug("'metadata.yaml' generated by charm, not using original project metadata.")
+        if is_reactive and (stage_dir / const.METADATA_FILENAME).exists():
+            emit.debug(
+                f"{const.METADATA_FILENAME!r} generated by charm. Not using original project metadata."
+            )
         else:
-            self._write_file_or_object(self.metadata.marshal(), const.METADATA_FILENAME, path)
-        if actions := cast(dict | None, project_dict.get("actions")):
+            self._write_file_or_object(
+                self.metadata.marshal(), const.METADATA_FILENAME, path
+            )
+        if is_reactive and (stage_dir / const.JUJU_ACTIONS_FILENAME).exists():
+            emit.debug(
+                f"{const.JUJU_ACTIONS_FILENAME!r} generated by charm. Skipping generation."
+            )
+        elif actions := cast(dict | None, project_dict.get("actions")):
             self._write_file_or_object(actions, "actions.yaml", path)
         if config := cast(dict | None, project_dict.get("config")):
             self._write_file_or_object(config, "config.yaml", path)

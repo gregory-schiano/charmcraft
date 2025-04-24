@@ -21,6 +21,7 @@ import pathlib
 import socket
 import subprocess
 import sys
+from collections.abc import Callable
 from unittest.mock import call, patch
 
 import pytest
@@ -281,8 +282,7 @@ def test_build_generics_symlink_file(tmp_path):
     built_symlink = build_dir / "somehook.py"
     assert built_symlink.is_symlink()
     assert built_symlink.resolve() == build_dir / "crazycharm.py"
-    real_link = built_symlink.readlink()
-    assert real_link == pathlib.Path("crazycharm.py")
+    assert built_symlink.readlink() == pathlib.Path("crazycharm.py")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows not [yet] supported")
@@ -511,8 +511,7 @@ def test_build_dispatcher_classic_hooks_mandatory_created(tmp_path):
     test_hook = build_dir / const.HOOKS_DIRNAME / "testhook"
     assert test_hook.is_symlink()
     assert test_hook.resolve() == included_dispatcher
-    real_link = test_hook.readlink()
-    assert real_link == pathlib.Path("..", const.DISPATCH_FILENAME)
+    assert test_hook.readlink() == pathlib.Path("..", const.DISPATCH_FILENAME)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows not [yet] supported")
@@ -523,7 +522,7 @@ def test_build_dispatcher_classic_hooks_mandatory_respected(tmp_path):
     build_dir = tmp_path / const.BUILD_DIRNAME
     build_dir.mkdir()
 
-    built_hooks_dir = build_dir / const.DISPATCH_FILENAME
+    built_hooks_dir = build_dir / const.HOOKS_DIRNAME
     built_hooks_dir.mkdir()
     test_hook = built_hooks_dir / "testhook"
     with test_hook.open("wb") as fh:
@@ -583,22 +582,158 @@ def test_build_dispatcher_classic_hooks_linking_charm_replaced(tmp_path, assert_
 # -- tests about dependencies handling
 
 
-def test_build_dependencies_virtualenv_simple(tmp_path, assert_output):
+@pytest.mark.parametrize(
+    (
+        "python_packages",
+        "binary_packages",
+        "reqs_contents",
+        "charmlibs",
+        "expected_call_params",
+    ),
+    [
+        pytest.param(
+            [],
+            [],
+            [],
+            [],
+            [["install", "--no-binary=:all:", "--requirement={reqs_file}"]],
+            id="simple",
+        ),
+        pytest.param(
+            ["pkg1", "pkg2"],
+            [],
+            [],
+            [],
+            [
+                ["install", "--no-binary=:all:", "pkg1", "pkg2"],
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="packages-only",
+        ),
+        pytest.param(
+            [],
+            ["bin-pkg1", "bin-pkg2"],
+            [],
+            [],
+            [
+                ["install", "bin-pkg1", "bin-pkg2"],
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="binary-packages-only",
+        ),
+        pytest.param(
+            ["pkg1", "pkg2"],
+            ["bin-pkg1", "bin-pkg2"],
+            [],
+            [],
+            [
+                ["install", "bin-pkg1", "bin-pkg2"],
+                ["install", "--no-binary=:all:", "pkg1", "pkg2"],
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="binary-and-source-packages",
+        ),
+        pytest.param(
+            [],
+            [],
+            ["req1", "req2"],
+            [],
+            [
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="requirements-only",
+        ),
+        pytest.param(
+            ["req1"],
+            ["req2"],
+            ["req1", "req2"],
+            [],
+            [
+                ["install", "req2"],
+                ["install", "--no-binary=:all:", "req1"],
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="requirements-duplicated-in-charmcraft_yaml",
+        ),
+        pytest.param(
+            [],
+            [],
+            [],
+            ["charmlib-dep"],
+            [
+                [
+                    "install",
+                    "--no-binary=:all:",
+                    "--requirement={reqs_file}",
+                    "charmlib-dep",
+                ]
+            ],
+            id="charmlib-dep-only",
+        ),
+        pytest.param(
+            [],
+            [],
+            ["charmlib-dep==0.1", "req1"],
+            ["charmlib-dep"],
+            [["install", "--no-binary=:all:", "--requirement={reqs_file}"]],
+            id="charmlib-dep-in-requirements",
+        ),
+        pytest.param(
+            ["duplicate"],
+            ["duplicate"],
+            ["duplicate"],
+            ["duplicate"],
+            [
+                ["install", "duplicate"],
+                ["install", "--no-binary=:all:", "duplicate"],
+                ["install", "--no-binary=:all:", "--requirement={reqs_file}"],
+            ],
+            id="all-same",
+        ),
+        pytest.param(
+            ["duplicate", "pkg1"],
+            ["duplicate", "bin-pkg1"],
+            ["duplicate", "req1"],
+            ["duplicate", "lib-dep"],
+            [
+                ["install", "bin-pkg1", "duplicate"],
+                ["install", "--no-binary=:all:", "duplicate", "pkg1"],
+                [
+                    "install",
+                    "--no-binary=:all:",
+                    "--requirement={reqs_file}",
+                    "lib-dep",
+                ],
+            ],
+            id="all-overlap",
+        ),
+    ],
+)
+def test_build_dependencies_virtualenv(
+    tmp_path: pathlib.Path,
+    assert_output: Callable,
+    python_packages: list[str],
+    binary_packages: list[str],
+    reqs_contents: list[str],
+    charmlibs: list[str],
+    expected_call_params,
+):
     """A virtualenv is created with the specified requirements file."""
     build_dir = tmp_path / const.BUILD_DIRNAME
     build_dir.mkdir()
 
     reqs_file = tmp_path / "reqs.txt"
-    reqs_file.touch()
+    reqs_file.write_text("\n".join(reqs_contents))
 
     builder = CharmBuilder(
         builddir=tmp_path,
         installdir=build_dir,
         entrypoint=pathlib.Path("whatever"),
-        binary_python_packages=[],
-        python_packages=[],
+        binary_python_packages=binary_packages,
+        python_packages=python_packages,
         requirements=[reqs_file],
     )
+    builder.charmlib_deps = set(charmlibs)
 
     with patch("charmcraft.charm_builder.get_pip_version") as mock_pip_version:
         mock_pip_version.return_value = (22, 0)
@@ -606,18 +741,28 @@ def test_build_dependencies_virtualenv_simple(tmp_path, assert_output):
             with patch("shutil.copytree") as mock_copytree:
                 builder.handle_dependencies()
 
-    pip_cmd = str(charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip"))
+    pip_cmd = str(
+        charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip")
+    )
+
+    formatted_calls = [
+        [param.format(reqs_file=str(reqs_file)) for param in call]
+        for call in expected_call_params
+    ]
+    extra_pip_calls = [call([pip_cmd, *params]) for params in formatted_calls]
 
     assert mock.mock_calls == [
         call(["python3", "-m", "venv", str(tmp_path / const.STAGING_VENV_DIRNAME)]),
-        call([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"]),
-        call([pip_cmd, "install", f"--requirement={reqs_file}"]),
+        call([pip_cmd, "install", "--force-reinstall", f"pip@{KNOWN_GOOD_PIP_URL}"]),
+        *extra_pip_calls,
     ]
 
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
     assert_output("Handling dependencies", "Installing dependencies")
 
 
@@ -646,14 +791,17 @@ def test_build_dependencies_virtualenv_multiple(tmp_path, assert_output):
             with patch("shutil.copytree") as mock_copytree:
                 builder.handle_dependencies()
 
-    pip_cmd = str(charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip"))
+    pip_cmd = str(
+        charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip")
+    )
     assert mock.mock_calls == [
         call(["python3", "-m", "venv", str(tmp_path / const.STAGING_VENV_DIRNAME)]),
-        call([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"]),
+        call([pip_cmd, "install", "--force-reinstall", f"pip@{KNOWN_GOOD_PIP_URL}"]),
         call(
             [
                 pip_cmd,
                 "install",
+                "--no-binary=:all:",
                 f"--requirement={reqs_file_1}",
                 f"--requirement={reqs_file_2}",
             ]
@@ -663,7 +811,9 @@ def test_build_dependencies_virtualenv_multiple(tmp_path, assert_output):
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
     assert_output("Handling dependencies", "Installing dependencies")
 
 
@@ -686,131 +836,6 @@ def test_build_dependencies_virtualenv_none(tmp_path, assert_output):
 
     mock_run.assert_not_called()
     assert_output("Handling dependencies", "No dependencies to handle")
-
-
-def test_build_dependencies_virtualenv_packages(tmp_path, assert_output):
-    """A virtualenv is created with the specified packages."""
-    build_dir = tmp_path / const.BUILD_DIRNAME
-    build_dir.mkdir()
-
-    builder = CharmBuilder(
-        builddir=tmp_path,
-        installdir=build_dir,
-        entrypoint=pathlib.Path("whatever"),
-        binary_python_packages=[],
-        python_packages=["pkg1", "pkg2"],
-        requirements=[],
-    )
-
-    with patch("charmcraft.charm_builder.get_pip_version") as mock_pip_version:
-        mock_pip_version.return_value = (22, 0)
-        with patch("charmcraft.charm_builder._process_run") as mock:
-            with patch("shutil.copytree") as mock_copytree:
-                builder.handle_dependencies()
-
-    pip_cmd = str(charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip"))
-
-    assert mock.mock_calls == [
-        call(["python3", "-m", "venv", str(tmp_path / const.STAGING_VENV_DIRNAME)]),
-        call([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"]),
-        call([pip_cmd, "install", "--no-binary=pkg1,pkg2", "pkg1", "pkg2"]),
-    ]
-
-    site_packages_dir = charm_builder._find_venv_site_packages(
-        pathlib.Path(const.STAGING_VENV_DIRNAME)
-    )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
-    assert_output("Handling dependencies", "Installing dependencies")
-
-
-def test_build_dependencies_virtualenv_binary_packages(tmp_path, assert_output):
-    """A virtualenv is created with the specified packages."""
-    build_dir = tmp_path / const.BUILD_DIRNAME
-    build_dir.mkdir()
-
-    builder = CharmBuilder(
-        builddir=tmp_path,
-        installdir=build_dir,
-        entrypoint=pathlib.Path("whatever"),
-        binary_python_packages=["pkg1", "pkg2"],
-        python_packages=[],
-        requirements=[],
-    )
-
-    with patch("charmcraft.charm_builder.get_pip_version") as mock_pip_version:
-        mock_pip_version.return_value = (22, 0)
-        with patch("charmcraft.charm_builder._process_run") as mock:
-            with patch("shutil.copytree") as mock_copytree:
-                builder.handle_dependencies()
-
-    pip_cmd = str(charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip"))
-
-    assert mock.mock_calls == [
-        call(["python3", "-m", "venv", str(tmp_path / const.STAGING_VENV_DIRNAME)]),
-        call([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"]),
-        call([pip_cmd, "install", "pkg1", "pkg2"]),
-    ]
-
-    site_packages_dir = charm_builder._find_venv_site_packages(
-        pathlib.Path(const.STAGING_VENV_DIRNAME)
-    )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
-    assert_output("Handling dependencies", "Installing dependencies")
-
-
-def test_build_dependencies_virtualenv_all(tmp_path, assert_output):
-    """A virtualenv is created with the specified packages."""
-    build_dir = tmp_path / const.BUILD_DIRNAME
-    build_dir.mkdir()
-
-    reqs_file_1 = tmp_path / "reqs.txt"
-    reqs_file_1.touch()
-    reqs_file_2 = tmp_path / "reqs.txt"
-    reqs_file_1.touch()
-
-    builder = CharmBuilder(
-        builddir=tmp_path,
-        installdir=build_dir,
-        entrypoint=pathlib.Path("whatever"),
-        binary_python_packages=["pkg1", "pkg2"],
-        python_packages=["pkg3", "pkg4"],
-        requirements=[reqs_file_1, reqs_file_2],
-    )
-    builder.charmlib_deps = ["pkg5", "pkg6"]
-
-    with patch("charmcraft.charm_builder.get_pip_version") as mock_pip_version:
-        mock_pip_version.return_value = (22, 0)
-        with patch("charmcraft.charm_builder._process_run") as mock:
-            with patch("shutil.copytree") as mock_copytree:
-                builder.handle_dependencies()
-
-    pip_cmd = str(charm_builder._find_venv_bin(tmp_path / const.STAGING_VENV_DIRNAME, "pip"))
-
-    assert mock.mock_calls == [
-        call(["python3", "-m", "venv", str(tmp_path / const.STAGING_VENV_DIRNAME)]),
-        call([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"]),
-        call(
-            [
-                pip_cmd,
-                "install",
-                "--no-binary=pkg3,pkg4,pkg5,pkg6",
-                f"--requirement={reqs_file_1}",
-                f"--requirement={reqs_file_2}",
-                "pkg1",
-                "pkg2",
-                "pkg3",
-                "pkg4",
-                "pkg5",
-                "pkg6",
-            ]
-        ),
-    ]
-
-    site_packages_dir = charm_builder._find_venv_site_packages(
-        pathlib.Path(const.STAGING_VENV_DIRNAME)
-    )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
-    assert_output("Handling dependencies", "Installing dependencies")
 
 
 def test_build_dependencies_no_reused_missing_venv(tmp_path, assert_output):
@@ -836,7 +861,9 @@ def test_build_dependencies_no_reused_missing_venv(tmp_path, assert_output):
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed
@@ -846,7 +873,9 @@ def test_build_dependencies_no_reused_missing_venv(tmp_path, assert_output):
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
     # remove the site venv directory
     staging_venv_dir.rmdir()
@@ -855,7 +884,9 @@ def test_build_dependencies_no_reused_missing_venv(tmp_path, assert_output):
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed *again*
@@ -865,7 +896,9 @@ def test_build_dependencies_no_reused_missing_venv(tmp_path, assert_output):
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
 
 def test_build_dependencies_no_reused_missing_hash_file(tmp_path, assert_output):
@@ -891,7 +924,9 @@ def test_build_dependencies_no_reused_missing_hash_file(tmp_path, assert_output)
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed
@@ -901,7 +936,9 @@ def test_build_dependencies_no_reused_missing_hash_file(tmp_path, assert_output)
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
     # remove the hash file
     (tmp_path / const.DEPENDENCIES_HASH_FILENAME).unlink()
@@ -910,7 +947,9 @@ def test_build_dependencies_no_reused_missing_hash_file(tmp_path, assert_output)
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies hash file not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies hash file not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed *again*
@@ -920,7 +959,9 @@ def test_build_dependencies_no_reused_missing_hash_file(tmp_path, assert_output)
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
 
 def test_build_dependencies_no_reused_problematic_hash_file(tmp_path, assert_output):
@@ -946,7 +987,9 @@ def test_build_dependencies_no_reused_problematic_hash_file(tmp_path, assert_out
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed
@@ -956,10 +999,14 @@ def test_build_dependencies_no_reused_problematic_hash_file(tmp_path, assert_out
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
     # avoid the file to be read successfully
-    (tmp_path / const.DEPENDENCIES_HASH_FILENAME).write_bytes(b"\xc3\x28")  # invalid UTF8
+    (tmp_path / const.DEPENDENCIES_HASH_FILENAME).write_bytes(
+        b"\xc3\x28"
+    )  # invalid UTF8
 
     # second run!
     with patch("shutil.copytree") as mock_copytree:
@@ -978,7 +1025,9 @@ def test_build_dependencies_no_reused_problematic_hash_file(tmp_path, assert_out
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -991,7 +1040,12 @@ def test_build_dependencies_no_reused_problematic_hash_file(tmp_path, assert_out
     ],
 )
 def test_build_dependencies_no_reused_different_dependencies(
-    tmp_path, assert_output, new_reqs_content, new_pypackages, new_pybinaries, new_charmlibdeps
+    tmp_path,
+    assert_output,
+    new_reqs_content,
+    new_pypackages,
+    new_pybinaries,
+    new_charmlibdeps,
 ):
     """Dependencies are built again because changed from previous run."""
     build_dir = tmp_path / const.BUILD_DIRNAME
@@ -1024,7 +1078,9 @@ def test_build_dependencies_no_reused_different_dependencies(
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed
@@ -1034,7 +1090,9 @@ def test_build_dependencies_no_reused_different_dependencies(
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
     # for the second call, default new dependencies to first ones so only one is changed at a time
     if new_reqs_content is not None:
@@ -1061,7 +1119,9 @@ def test_build_dependencies_no_reused_different_dependencies(
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
 
 def test_build_dependencies_reused(tmp_path, assert_output):
@@ -1091,7 +1151,9 @@ def test_build_dependencies_reused(tmp_path, assert_output):
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Dependencies directory not found", "Installing dependencies"
+        "Handling dependencies",
+        "Dependencies directory not found",
+        "Installing dependencies",
     )
 
     # directory created and packages installed
@@ -1101,13 +1163,16 @@ def test_build_dependencies_reused(tmp_path, assert_output):
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
     # second run!
     with patch("shutil.copytree") as mock_copytree:
         builder.handle_dependencies()
     assert_output(
-        "Handling dependencies", "Reusing installed dependencies, they are equal to last run ones"
+        "Handling dependencies",
+        "Reusing installed dependencies, they are equal to last run ones",
     )
 
     # installation directory copied *again* to the build directory (this is always done as
@@ -1115,7 +1180,9 @@ def test_build_dependencies_reused(tmp_path, assert_output):
     site_packages_dir = charm_builder._find_venv_site_packages(
         pathlib.Path(const.STAGING_VENV_DIRNAME)
     )
-    assert mock_copytree.mock_calls == [call(site_packages_dir, build_dir / const.VENV_DIRNAME)]
+    assert mock_copytree.mock_calls == [
+        call(site_packages_dir, build_dir / const.VENV_DIRNAME)
+    ]
 
 
 # -- tests about juju ignore
@@ -1174,8 +1241,12 @@ def test_builder_arguments_defaults(tmp_path):
 
     fake_argv = ["cmd", "--builddir", "builddir", "--installdir", "installdir"]
     with patch.object(sys, "argv", fake_argv):
-        with patch("charmcraft.charm_builder.CharmBuilder.build_charm", new=mock_build_charm):
-            with patch("charmcraft.charm_builder.collect_charmlib_pydeps") as mock_collect_pydeps:
+        with patch(
+            "charmcraft.charm_builder.CharmBuilder.build_charm", new=mock_build_charm
+        ):
+            with patch(
+                "charmcraft.charm_builder.collect_charmlib_pydeps"
+            ) as mock_collect_pydeps:
                 with pytest.raises(SystemExit) as raised:
                     charm_builder.main()
         assert raised.value.code == 42
@@ -1189,14 +1260,21 @@ def test_builder_arguments_full(tmp_path):
         assert self.builddir == pathlib.Path("builddir")
         assert self.installdir == pathlib.Path("installdir")
         assert self.entrypoint == pathlib.Path("src/charm.py")
-        assert self.requirement_paths == [pathlib.Path("reqs1.txt"), pathlib.Path("reqs2.txt")]
+        assert self.requirement_paths == [
+            pathlib.Path("reqs1.txt"),
+            pathlib.Path("reqs2.txt"),
+        ]
         sys.exit(42)
 
     fake_argv = ["cmd", "--builddir", "builddir", "--installdir", "installdir"]
     fake_argv += ["-rreqs1.txt", "--requirement", "reqs2.txt"]
     with patch.object(sys, "argv", fake_argv):
-        with patch("charmcraft.charm_builder.CharmBuilder.build_charm", new=mock_build_charm):
-            with patch("charmcraft.charm_builder.collect_charmlib_pydeps") as mock_collect_pydeps:
+        with patch(
+            "charmcraft.charm_builder.CharmBuilder.build_charm", new=mock_build_charm
+        ):
+            with patch(
+                "charmcraft.charm_builder.collect_charmlib_pydeps"
+            ) as mock_collect_pydeps:
                 with pytest.raises(SystemExit) as raised:
                     charm_builder.main()
         assert raised.value.code == 42
@@ -1294,7 +1372,11 @@ def test_find_venv_site_packages(monkeypatch, platform, result):
         site_packages_dir = charm_builder._find_venv_site_packages(basedir)
     assert mock_run.mock_calls == [
         call(
-            ["python3", "-c", "import sys; v=sys.version_info; print(f'{v.major} {v.minor}')"],
+            [
+                "python3",
+                "-c",
+                "import sys; v=sys.version_info; print(f'{v.major} {v.minor}')",
+            ],
             text=True,
         )
     ]

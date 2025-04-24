@@ -15,6 +15,7 @@
 # For further info, check https://github.com/canonical/charmcraft
 
 """Constants used in charmcraft."""
+
 import enum
 from typing import Literal
 
@@ -32,7 +33,6 @@ STORE_STORAGE_ENV_VAR = "CHARMCRAFT_UPLOAD_URL"
 STORE_REGISTRY_ENV_VAR = "CHARMCRAFT_REGISTRY_URL"
 # These are only for use within the managed environment
 MANAGED_MODE_ENV_VAR = "CHARMCRAFT_MANAGED_MODE"
-SNAP_CHANNEL_ENV_VAR = "CHARMCRAFT_INSTALL_SNAP_CHANNEL"
 # endregion
 # region Project files and directories
 CHARMCRAFT_FILENAME = "charmcraft.yaml"
@@ -59,8 +59,9 @@ CommonBaseStr = Literal[  # Bases supported as both build bases and run bases
     "ubuntu@18.04",
     "ubuntu@20.04",
     "ubuntu@22.04",
-    "ubuntu@23.10",
     "ubuntu@24.04",
+    "ubuntu@24.10",
+    "ubuntu@25.04",
     "centos@7",
     "almalinux@9",
 ]
@@ -74,7 +75,6 @@ SUPPORTED_BASES = frozenset(
         BaseName("ubuntu", "18.04"),
         BaseName("ubuntu", "20.04"),
         BaseName("ubuntu", "22.04"),
-        BaseName("ubuntu", "23.10"),
         BaseName("ubuntu", "24.04"),
         BaseName("ubuntu", "devel"),
         BaseName("centos", "7"),
@@ -97,6 +97,20 @@ class CharmArch(str, enum.Enum):
 
     def __str__(self) -> str:
         return str(self.value)
+
+
+GO_ARCH_TO_CHARM_ARCH = {
+    "arm": "armhf",
+    "ppc64le": "ppc64el",
+}
+"""Mapping to convert go architectures to charm architecture strings.
+
+Architectures not included here are the same in GOARCH as charm arch names.
+
+go architectures are also used as OCI image architectures.
+Reference 1: https://github.com/opencontainers/image-spec/blob/main/config.md#properties
+Reference 2: https://go.dev/doc/install/source#environment
+"""
 
 
 SUPPORTED_ARCHITECTURES = frozenset(arch.value for arch in CharmArch)
@@ -146,6 +160,7 @@ UBUNTU_LTS_STABLE = frozenset(
         "18.04",
         "20.04",
         "22.04",
+        "24.04",
     )
 )
 

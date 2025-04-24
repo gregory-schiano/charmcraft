@@ -1,6 +1,7 @@
 name: Spread
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - main
@@ -9,7 +10,7 @@ on:
 
 jobs:
   snap-build:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, amd64]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -84,6 +85,7 @@ jobs:
         name: Run spread
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMCRAFT_AUTH }}
+          CHARMCRAFT_SINGLE_CHARM_AUTH: ${{ secrets.CHARMCRAFT_SINGLE_CHARM_AUTH }}
           CHARM_DEFAULT_NAME: gh-ci-charmcraft-charm
           BUNDLE_DEFAULT_NAME: gh-ci-charmcraft-bundle
         run: |

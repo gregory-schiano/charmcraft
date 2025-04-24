@@ -1,4 +1,4 @@
-# Copyright 2023-2024 Canonical Ltd.
+# Copyright 2023-2025 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,44 +14,62 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """New entrypoint for charmcraft."""
+
 from __future__ import annotations
 
 import pathlib
 import shutil
-import sys
 from typing import Any
 
+import craft_application
 import craft_cli
-from craft_application import Application, AppMetadata
-from craft_parts.plugins import plugins
+from craft_application import util
+from craft_parts.plugins.plugins import PluginType
 from overrides import override
 
-from charmcraft import errors, extensions, models, preprocess, services
+from charmcraft import extensions, models, parts, preprocess, services
 from charmcraft.application import commands
-from charmcraft.main import GENERAL_SUMMARY
-from charmcraft.main import main as old_main
-from charmcraft.parts import BundlePlugin, CharmPlugin, ReactivePlugin
 from charmcraft.services import CharmcraftServiceFactory
 
-APP_METADATA = AppMetadata(
+GENERAL_SUMMARY = """
+Charmcraft helps build, package and publish operators on Charmhub.
+
+Together with the Python Operator Framework, charmcraft simplifies
+operator development and collaboration.
+
+See https://charmhub.io/publishing for more information.
+"""
+
+APP_METADATA = craft_application.AppMetadata(
     name="charmcraft",
     summary=GENERAL_SUMMARY,
     ProjectClass=models.CharmcraftProject,
     BuildPlannerClass=models.CharmcraftBuildPlanner,
+    source_ignore_patterns=["*.charm", "charmcraft.yaml"],
+    docs_url="https://canonical-charmcraft.readthedocs-hosted.com/en/{version}",
+)
+
+PRIME_BEHAVIOUR_CHANGE_MESSAGE = (
+    "IMPORTANT: The behaviour of the 'prime' keyword has changed in Charmcraft 3. This "
+    "keyword will no longer add files that would otherwise be excluded from the "
+    "charm, instead filtering existing files. Additional files may be added using the "
+    "'dump' plugin.\n"
+    "To include extra files, see: https://juju.is/docs/sdk/include-extra-files-in-a-charm"
 )
 
 
-class Charmcraft(Application):
+class Charmcraft(craft_application.Application):
     """Charmcraft application definition."""
 
     def __init__(
         self,
-        app: AppMetadata,
+        app: craft_application.AppMetadata,
         services: CharmcraftServiceFactory,
     ) -> None:
-        super().__init__(app=app, services=services)
+        super().__init__(app=app, services=services, extra_loggers={"charmcraft"})
         self._global_args: dict[str, Any] = {}
         self._dispatcher: craft_cli.Dispatcher | None = None
+        self._cli_loggers |= {"charmcraft"}
 
     @property
     def command_groups(self) -> list[craft_cli.CommandGroup]:
@@ -64,24 +82,23 @@ class Charmcraft(Application):
 
     def _check_deprecated(self, yaml_data: dict[str, Any]) -> None:
         """Check for deprecated fields in the yaml_data."""
+        # We only need to warn people once.
+        if self.is_managed():
+            return
+        has_primed_part = False
         if "parts" in yaml_data:
-            for k, v in yaml_data["parts"].items():
-                if (k in ("charm", "reactive", "bundle")) or (
-                    v.get("plugin", None) in ("charm", "reactive", "bundle")
-                ):
-                    if "prime" in v:
-                        craft_cli.emit.progress(
-                            "Warning: use of 'prime' in a charm part "
-                            "is deprecated and no longer works, "
-                            "see https://juju.is/docs/sdk/include-extra-files-in-a-charm",
-                            permanent=True,
-                        )
+            prime_changed_extensions = {"charm", "reactive", "bundle"}
+            for name, part in yaml_data["parts"].items():
+                if not {name, part.get("plugin", None)} & prime_changed_extensions:
+                    continue
+                if "prime" in part:
+                    has_primed_part = True
+        if has_primed_part:
+            craft_cli.emit.progress(PRIME_BEHAVIOUR_CHANGE_MESSAGE, permanent=True)
 
     def _extra_yaml_transform(
         self, yaml_data: dict[str, Any], *, build_on: str, build_for: str | None
     ) -> dict[str, Any]:
-        self._check_deprecated(yaml_data)
-
         # Extensions get applied on as close as possible to what the user provided.
         yaml_data = extensions.apply_extensions(self.project_dir, yaml_data.copy())
 
@@ -92,6 +109,7 @@ class Charmcraft(Application):
         preprocess.add_actions(self.project_dir, yaml_data)
         preprocess.add_metadata(self.project_dir, yaml_data)
 
+        self._check_deprecated(yaml_data)
         return yaml_data
 
     def _configure_services(self, provider_name: str | None) -> None:
@@ -100,6 +118,10 @@ class Charmcraft(Application):
             "package",
             project_dir=self.project_dir,
             build_plan=self._build_plan,
+        )
+        self.services.update_kwargs(
+            "charm_libs",
+            project_dir=self.project_dir,
         )
 
     def configure(self, global_args: dict[str, Any]) -> None:
@@ -113,14 +135,16 @@ class Charmcraft(Application):
         return self._dispatcher
 
     @override
-    def _get_app_plugins(self) -> dict[str, plugins.PluginType]:
-        return {"charm": CharmPlugin, "bundle": BundlePlugin, "reactive": ReactivePlugin}
+    def _get_app_plugins(self) -> dict[str, PluginType]:
+        return parts.get_app_plugins()
 
     @override
     def _pre_run(self, dispatcher: craft_cli.Dispatcher) -> None:
         """Override to get project_dir early."""
         super()._pre_run(dispatcher)
-        if not self.is_managed() and not getattr(dispatcher.parsed_args(), "project_dir", None):
+        if not self.is_managed() and not getattr(
+            dispatcher.parsed_args(), "project_dir", None
+        ):
             self.project_dir = pathlib.Path().expanduser().resolve()
 
     def run_managed(self, platform: str | None, build_for: str | None) -> None:
@@ -141,21 +165,50 @@ class Charmcraft(Application):
                 output_path.mkdir(parents=True, exist_ok=True)
                 package_file_path = self._work_dir / ".charmcraft_output_packages.txt"
                 if package_file_path.exists():
-                    package_files = package_file_path.read_text().splitlines(keepends=False)
+                    package_files = package_file_path.read_text().splitlines(
+                        keepends=False
+                    )
                     package_file_path.unlink(missing_ok=True)
                     for filename in package_files:
-                        shutil.move(str(self._work_dir / filename), output_path / filename)
+                        shutil.move(
+                            str(self._work_dir / filename), output_path / filename
+                        )
+
+    def _expand_environment(self, yaml_data: dict[str, Any], build_for: str) -> None:
+        """Perform expansion of project environment variables.
+
+        :param yaml_data: The project's yaml data.
+        :param build_for: The architecture to build for.
+        """
+        if "-" in build_for:
+            build_for = util.get_host_architecture()
+            craft_cli.emit.debug(
+                "Expanding environment variables with the host architecture "
+                f"{build_for!r} as the build-for architecture because multiple "
+                "run-on architectures were specified."
+            )
+        super()._expand_environment(yaml_data, build_for)
+
+
+def create_app() -> Charmcraft:
+    """Create the Charmcraft application with its commands."""
+    charmcraft_services = services.CharmcraftServiceFactory(app=APP_METADATA)
+    app = Charmcraft(app=APP_METADATA, services=charmcraft_services)
+    commands.fill_command_groups(app)
+
+    return app
+
+
+def get_app_info() -> tuple[craft_cli.Dispatcher, dict[str, Any]]:
+    """Retrieve application info. Used by craft-cli's completion module."""
+    app = create_app()
+    dispatcher = app._create_dispatcher()
+
+    return dispatcher, app.app_config
 
 
 def main() -> int:
-    """Run craft-application based charmcraft with classic fallback."""
-    charmcraft_services = services.CharmcraftServiceFactory(app=APP_METADATA)
+    """Run craft-application based charmcraft."""
+    app = create_app()
 
-    app = Charmcraft(app=APP_METADATA, services=charmcraft_services)
-
-    commands.fill_command_groups(app)
-
-    try:
-        return app.run()
-    except errors.ClassicFallback:
-        return old_main(sys.argv)
+    return app.run()

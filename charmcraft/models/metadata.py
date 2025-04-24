@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import pydantic
 from craft_application import models
+from craft_application.models import base
 from craft_cli import CraftError
 from typing_extensions import Self, override
 
@@ -37,12 +38,20 @@ class CharmMetadata(models.BaseMetadata):
     of a charm.
     """
 
+    model_config = pydantic.ConfigDict(
+        validate_assignment=True,
+        extra="ignore",
+        populate_by_name=True,
+        alias_generator=base.alias_generator,
+    )
+
     name: models.ProjectName
     display_name: models.ProjectTitle | None = None
-    summary: models.SummaryStr
+    summary: pydantic.StrictStr
     description: pydantic.StrictStr
     maintainers: list[pydantic.StrictStr] | None = None
     assumes: list[str | dict[str, list | dict]] | None = None
+    charm_user: str | None = None
     containers: dict[str, Any] | None = None
     devices: dict[str, Any] | None = None
     docs: pydantic.AnyHttpUrl | None = None
@@ -64,13 +73,13 @@ class CharmMetadata(models.BaseMetadata):
 
         Performs the necessary renaming and reorganisation.
         """
-        charm_dict = charm.dict(
-            include=const.METADATA_YAML_KEYS | {"title"},
+        charm_dict = charm.model_dump(
             exclude_none=True,
             by_alias=True,
+            exclude_defaults=False,
         )
 
-        # Flatten links and match to the appropriate metadata.yaml name
+        # Flatten links and match to the appropriate metadata.yaml schema
         if charm.links is not None:
             links = charm.links.marshal()
             if "documentation" in links:
@@ -85,14 +94,14 @@ class CharmMetadata(models.BaseMetadata):
         if "title" in charm_dict:
             charm_dict["display-name"] = charm_dict.pop("title")
 
-        return cls.parse_obj(charm_dict)
+        return cls.model_validate(charm_dict)
 
 
 class CharmMetadataLegacy(CharmMetadata):
     """Object representing LEGACY charm metadata.yaml contents.
 
     This model only supports the legacy charm metadata.yaml format for compatibility.
-    New metadata defined in charmcraft.yaml is handled by the CharmcraftConfig model.
+    New metadata defined in charmcraft.yaml is handled by the CharmcraftProject models.
 
     specs: https://juju.is/docs/sdk/metadata-yaml
     """
@@ -122,7 +131,7 @@ class CharmMetadataLegacy(CharmMetadata):
             data["maintainers"] = [data["maintainer"]]
             del data["maintainer"]
 
-        return cls.parse_obj(data)
+        return cls.model_validate(data)
 
 
 class BundleMetadata(models.BaseMetadata):
@@ -136,6 +145,6 @@ class BundleMetadata(models.BaseMetadata):
         """Turn a populated bundle model into a metadata.yaml model."""
         bundle_dict = bundle.marshal()
         if "bundle" in bundle_dict:
-            return cls.parse_obj(bundle_dict["bundle"])
+            return cls.model_validate(bundle_dict["bundle"])
         del bundle_dict["type"]
-        return cls.parse_obj(bundle_dict)
+        return cls.model_validate(bundle_dict)

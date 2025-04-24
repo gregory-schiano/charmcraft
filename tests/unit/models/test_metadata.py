@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Tests for metadata models."""
+
 import json
 
 import pytest
@@ -22,7 +23,7 @@ from charmcraft.models import metadata, project
 
 BASIC_CHARM_METADATA_DICT = {
     "name": "test-charm",
-    "summary": "A charm for testing",
+    "summary": "A charm for testing, with a summary string that is more than seventy-eight characters long.",
     "description": "A fake charm used for testing purposes.",
 }
 BASIC_CHARM_DICT = {
@@ -46,8 +47,8 @@ BASIC_BUNDLE_DICT = {
     [
         (BASIC_CHARM_DICT, BASIC_CHARM_METADATA_DICT),
         (
-            dict(**BASIC_CHARM_DICT, links={"documentation": "https://docs.url"}),
-            {**BASIC_CHARM_METADATA_DICT, "docs": "https://docs.url"},
+            dict(**BASIC_CHARM_DICT, links={"documentation": "https://docs.url/"}),
+            {**BASIC_CHARM_METADATA_DICT, "docs": "https://docs.url/"},
         ),
         (
             dict(**BASIC_CHARM_DICT, links={"contact": "someone@company.com"}),
@@ -72,12 +73,20 @@ BASIC_BUNDLE_DICT = {
             dict(**BASIC_CHARM_DICT, title="Title becomes display name"),
             {**BASIC_CHARM_METADATA_DICT, "display-name": "Title becomes display name"},
         ),
+        pytest.param(
+            {**BASIC_CHARM_DICT, "charm-user": "sudoer"},
+            {**BASIC_CHARM_METADATA_DICT, "charm-user": "sudoer"},
+            id="sudoer",
+        ),
     ],
 )
 def test_charm_metadata_from_charm_success(charm_dict, expected):
     charm = project.CharmcraftProject.unmarshal(charm_dict)
 
-    assert json.loads(json.dumps(metadata.CharmMetadata.from_charm(charm).marshal())) == expected
+    assert (
+        json.loads(json.dumps(metadata.CharmMetadata.from_charm(charm).marshal()))
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -90,5 +99,6 @@ def test_bundle_metadata_from_bundle(bundle_dict, expected):
     bundle = project.Bundle.unmarshal(BASIC_BUNDLE_DICT)
 
     assert (
-        json.loads(json.dumps(metadata.BundleMetadata.from_bundle(bundle).marshal())) == expected
+        json.loads(json.dumps(metadata.BundleMetadata.from_bundle(bundle).marshal()))
+        == expected
     )

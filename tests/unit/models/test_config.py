@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Tests for the config model."""
+
 import math
 
 import pydantic
@@ -36,7 +37,10 @@ from charmcraft.models.config import (
         {
             "favourite integer": {"type": "int"},
             "favourite number": {"type": "float", "default": math.pi},
-            "catchphrase": {"type": "string", "description": "What's your catchphrase?"},
+            "catchphrase": {
+                "type": "string",
+                "description": "What's your catchphrase?",
+            },
             "default_answer": {
                 "type": "boolean",
                 "description": "Yes/no true or false",
@@ -46,11 +50,13 @@ from charmcraft.models.config import (
     ],
 )
 def test_valid_config(options):
-    assert JujuConfig.parse_obj({"options": options}) == JujuConfig(options=options)
+    assert JujuConfig.model_validate({"options": options}) == JujuConfig(
+        options=options
+    )
 
 
 def test_empty_config():
-    JujuConfig.parse_obj({})
+    JujuConfig.model_validate({})
 
 
 @pytest.mark.parametrize(
@@ -72,12 +78,15 @@ def test_correct_option_type(option, type_):
 @pytest.mark.parametrize(
     ("option", "match"),
     [
-        (None, "none is not an allowed value"),
-        ({}, "Discriminator 'type' is missing"),
-        ({"type": "stargate"}, "No match for discriminator 'type' and value 'stargate'"),
-        ({"type": "int", "default": 3.14}, "value is not a valid integer"),
-        ({"type": "float", "default": "pi"}, "value is not a valid float"),
-        ({"type": "boolean", "default": "maybe"}, "value could not be parsed to a boolean"),
+        (None, "Input should be a valid dict"),
+        ({}, "Unable to extract tag using discriminator 'type'"),
+        (
+            {"type": "stargate"},
+            "Input tag 'stargate' found using 'type' does not match any of the expected tags:",
+        ),
+        ({"type": "int", "default": 3.14}, "Input should be a valid integer"),
+        ({"type": "float", "default": "pi"}, "Input should be a valid number"),
+        ({"type": "boolean", "default": "maybe"}, "Input should be a valid boolean"),
     ],
 )
 def test_invalid_options(option, match):

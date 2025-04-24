@@ -94,6 +94,7 @@ assumes:
     - juju >= 3.0
     - juju < 4.0
 - k8s-api
+charm-user: non-root
 containers:
   super-app:
     resource: super-app-image
@@ -139,7 +140,6 @@ storage:
   jbod:
     type: block
     description: A nice block storage for me to use as swap space
-    shared: false
     properties:
     - transient
 subordinate: false

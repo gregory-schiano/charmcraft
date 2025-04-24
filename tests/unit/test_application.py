@@ -14,12 +14,18 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Unit tests for application class."""
-import textwrap
 
+import textwrap
+from unittest import mock
+
+import craft_application
+import craft_cli.pytest_plugin
 import pyfakefs.fake_filesystem
 import pytest
+from craft_application import util
 
-from charmcraft import application, errors
+from charmcraft import application, errors, services
+from charmcraft.application.main import PRIME_BEHAVIOUR_CHANGE_MESSAGE
 
 
 @pytest.mark.parametrize(
@@ -65,7 +71,13 @@ from charmcraft import application, errors
 )
 @pytest.mark.parametrize(
     "expected",
-    [{"name": "test-charm", "summary": "A test charm", "description": "A charm for testing!"}],
+    [
+        {
+            "name": "test-charm",
+            "summary": "A test charm",
+            "description": "A charm for testing!",
+        }
+    ],
 )
 def test_extra_yaml_transform_success(
     fs: pyfakefs.fake_filesystem.FakeFilesystem,
@@ -78,7 +90,9 @@ def test_extra_yaml_transform_success(
     fs.create_file("metadata.yaml", contents=metadata_yaml)
     app = application.Charmcraft(app=application.APP_METADATA, services=service_factory)
 
-    actual = app._extra_yaml_transform(charmcraft_dict, build_on="amd64", build_for=None)
+    actual = app._extra_yaml_transform(
+        charmcraft_dict, build_on="amd64", build_for=None
+    )
 
     assert actual == expected
 
@@ -189,8 +203,109 @@ def test_deprecated_prime_warning(
 
     app._extra_yaml_transform(charmcraft_dict, build_for=None, build_on="amd64")
 
-    emitter.assert_progress(
-        "Warning: use of 'prime' in a charm part is deprecated and no longer works, "
-        "see https://juju.is/docs/sdk/include-extra-files-in-a-charm",
-        permanent=True,
+    emitter.assert_progress(PRIME_BEHAVIOUR_CHANGE_MESSAGE, permanent=True)
+
+
+@pytest.mark.parametrize(
+    "base_charm",
+    [
+        {
+            "name": "test-charm",
+            "summary": "A test charm",
+            "description": "A charm for testing!",
+        },
+    ],
+)
+@pytest.mark.parametrize(
+    ("parts"),
+    [
+        pytest.param({}, id="no-parts"),
+        pytest.param(
+            {
+                "parts": {"charm": {}},
+            },
+            id="named-charm",
+        ),
+        pytest.param({"parts": {"my-part": {"plugin": "charm"}}}, id="charm-plugin"),
+        pytest.param(
+            {
+                "parts": {"reactive": {}},
+            },
+            id="named-reactive",
+        ),
+        pytest.param(
+            {"parts": {"my-part": {"plugin": "reactive"}}}, id="reactive-plugin"
+        ),
+        pytest.param(
+            {
+                "parts": {"bundle": {}},
+            },
+            id="named-bundle",
+        ),
+        pytest.param({"parts": {"my-part": {"plugin": "bundle"}}}, id="bundle-plugin"),
+    ],
+)
+def test_deprecated_prime_warning_not_raised(
+    emitter,
+    service_factory: services.CharmcraftServiceFactory,
+    base_charm: dict[str, str],
+    parts: dict[str, dict[str, str]],
+):
+    charmcraft_dict = base_charm | parts
+    app = application.Charmcraft(app=application.APP_METADATA, services=service_factory)
+
+    app._extra_yaml_transform(charmcraft_dict, build_for=None, build_on="amd64")
+
+    with pytest.raises(AssertionError, match="^Expected call"):
+        emitter.assert_progress(PRIME_BEHAVIOUR_CHANGE_MESSAGE, permanent=True)
+
+
+@pytest.mark.parametrize(
+    "charm_yaml",
+    [
+        {
+            "name": "test-charm",
+            "summary": "A test charm",
+            "description": "A charm for testing!",
+            "parts": {"charm": {"prime": ["something"]}},
+        },
+    ],
+)
+def test_deprecated_prime_warning_not_raised_in_managed_mode(
+    monkeypatch, emitter, service_factory: services.CharmcraftServiceFactory, charm_yaml
+):
+    monkeypatch.setenv("CRAFT_MANAGED_MODE", "1")
+
+    app = application.Charmcraft(app=application.APP_METADATA, services=service_factory)
+
+    app._extra_yaml_transform(charm_yaml, build_for=None, build_on="riscv64")
+
+
+@pytest.mark.parametrize(
+    "build_for",
+    [
+        "amd64-arm64",
+        "s390x-ppc64el-riscv64",
+    ],
+)
+def test_expand_environment_multi_arch(
+    monkeypatch: pytest.MonkeyPatch,
+    emitter: craft_cli.pytest_plugin.RecordingEmitter,
+    service_factory: services.CharmcraftServiceFactory,
+    build_for,
+) -> None:
+    mock_parent_expand_environment = mock.Mock()
+    monkeypatch.setattr(
+        craft_application.Application,
+        "_expand_environment",
+        mock_parent_expand_environment,
+    )
+    app = application.Charmcraft(app=application.APP_METADATA, services=service_factory)
+
+    app._expand_environment({}, build_for)
+
+    emitter.assert_debug(
+        "Expanding environment variables with the host architecture "
+        f"{util.get_host_architecture()!r} as the build-for architecture "
+        "because multiple run-on architectures were specified."
     )

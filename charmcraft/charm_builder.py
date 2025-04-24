@@ -1,4 +1,4 @@
-# Copyright 2020-2023 Canonical Ltd.
+# Copyright 2020-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,9 +40,13 @@ from charmcraft.utils import (
     make_executable,
     validate_strict_dependencies,
 )
+from charmcraft.utils.package import exclude_packages
 
-MINIMUM_PIP_VERSION = (23, 0)
-KNOWN_GOOD_PIP_URL = "https://files.pythonhosted.org/packages/ba/19/e63fb4e0d20e48bd2167bb7e857abc0e21679e24805ba921a224df8977c0/pip-23.2.1.tar.gz"
+MINIMUM_PIP_VERSION = (24, 1)
+KNOWN_GOOD_PIP_URL = "https://files.pythonhosted.org/packages/c0/d0/9641dc7b05877874c6418f8034ddefc809495e65caa14d38c7551cd114bb/pip-24.1.1.tar.gz"
+KNOWN_GOOD_PIP_HASH = (
+    "sha256:5aa64f65e1952733ee0a9a9b1f52496ebdb3f3077cc46f80a16d983b58d1180a"
+)
 
 
 def relativise(src, dst):
@@ -58,19 +62,19 @@ class CharmBuilder:
         builddir: pathlib.Path,
         installdir: pathlib.Path,
         entrypoint: pathlib.Path,
-        allow_pip_binary: bool = None,
-        binary_python_packages: list[str] = None,
-        python_packages: list[str] = None,
-        requirements: list[pathlib.Path] = None,
+        allow_pip_binary: bool = False,
+        binary_python_packages: list[str] | None = None,
+        python_packages: list[str] | None = None,
+        requirements: list[pathlib.Path] | None = None,
         strict_dependencies: bool = False,
     ) -> None:
         self.builddir = builddir
         self.installdir = installdir
         self.entrypoint = entrypoint
         self.allow_pip_binary = allow_pip_binary
-        self.binary_python_packages = binary_python_packages
-        self.python_packages = python_packages
-        self.requirement_paths = requirements
+        self.binary_python_packages = binary_python_packages or []
+        self.python_packages = python_packages or []
+        self.requirement_paths = requirements or []
         self.strict_dependencies = strict_dependencies
         self.ignore_rules = self._load_juju_ignore()
         self.ignore_rules.extend_patterns([f"/{const.STAGING_VENV_DIRNAME}"])
@@ -109,7 +113,9 @@ class CharmBuilder:
             dest_path.symlink_to(relative_link)
         else:
             rel_path = src_path.relative_to(self.builddir)
-            print(f"Ignoring symlink because targets outside the project: {str(rel_path)!r}")
+            print(
+                f"Ignoring symlink because targets outside the project: {str(rel_path)!r}"
+            )
 
     @instrum.Timer("Handling generic paths")
     def handle_generic_paths(self):
@@ -123,7 +129,9 @@ class CharmBuilder:
         """
         print("Linking in generic paths")
 
-        for basedir, dirnames, filenames in os.walk(str(self.builddir), followlinks=False):
+        for basedir, dirnames, filenames in os.walk(
+            str(self.builddir), followlinks=False
+        ):
             abs_basedir = pathlib.Path(basedir)
             rel_basedir = abs_basedir.relative_to(self.builddir)
 
@@ -202,10 +210,14 @@ class CharmBuilder:
             if node.resolve() == linked_entrypoint:
                 current_hooks_to_replace.append(node)
                 node.unlink()
-                print(f"Replacing existing hook {node.name!r} as it's a symlink to the entrypoint")
+                print(
+                    f"Replacing existing hook {node.name!r} as it's a symlink to the entrypoint"
+                )
 
         # include the mandatory ones and those we need to replace
-        hooknames = const.MANDATORY_HOOK_NAMES | {x.name for x in current_hooks_to_replace}
+        hooknames = const.MANDATORY_HOOK_NAMES | {
+            x.name for x in current_hooks_to_replace
+        }
         for hookname in hooknames:
             print(f"Creating the {hookname!r} hook script pointing to dispatch")
             dest_hook = dest_hookpath / hookname
@@ -225,7 +237,7 @@ class CharmBuilder:
         return hashlib.sha1(deps_mashup.encode("utf8")).hexdigest()
 
     @instrum.Timer("Installing dependencies")
-    def _install_dependencies(self, staging_venv_dir):
+    def _install_dependencies(self, staging_venv_dir: pathlib.Path):
         """Install all dependencies in a specific directory."""
         # create virtualenv using the host environment python
         with instrum.Timer("Creating venv"):
@@ -237,51 +249,61 @@ class CharmBuilder:
             # common charm dependencies (e.g. ops). Resolve this by updating to a
             # known working version of pip.
             if get_pip_version(pip_cmd) < MINIMUM_PIP_VERSION:
-                _process_run([pip_cmd, "install", f"pip@{KNOWN_GOOD_PIP_URL}"])
+                _process_run(
+                    [
+                        pip_cmd,
+                        "install",
+                        "--force-reinstall",
+                        f"pip@{KNOWN_GOOD_PIP_URL}",
+                    ]
+                )
 
         with instrum.Timer("Installing all dependencies"):
             if self.strict_dependencies:
                 self._install_strict_dependencies(pip_cmd)
                 return
 
-            # Legacy non-strict dependencies.
-            # This method is not valid for any bases added after 2024-01-01 or for DEVEL bases.
-            try:
+            # Non-strict dependency resolution:
+            # 1. Install binary-allowed packages
+            # 2. Install source packages
+            # 3. Install from requirements files and charm libs dependencies
+            if self.binary_python_packages:
+                print(
+                    "Installing binary-allowed packages and their dependencies.\n"
+                    "WARNING: dependencies may also be installed from binary wheels.\n"
+                    "Use strict mode to avoid these issues."
+                )
                 _process_run(
                     get_pip_command(
                         [pip_cmd, "install"],
-                        self.requirement_paths,
-                        source_deps=[*self.python_packages, *self.charmlib_deps],
+                        requirements_files=[],
                         binary_deps=self.binary_python_packages,
                     )
                 )
-            except RuntimeError:
-                print(
-                    "WARNING: Initial package installation failed. "
-                    "Falling back to older method, which may leave your charm "
-                    "in an un-runnable state."
+            if self.python_packages:
+                print("Installing Python pre-dependencies from source.")
+                _process_run(
+                    [pip_cmd, "install", "--no-binary=:all:", *self.python_packages]
                 )
-                if self.binary_python_packages:
-                    # install python packages, allowing binary packages
-                    cmd = [pip_cmd, "install", "--upgrade"]  # base command
-                    cmd.extend(self.binary_python_packages)  # the python packages to install
-                    _process_run(cmd)
-                if self.python_packages:
-                    # install python packages from source
-                    cmd = [pip_cmd, "install", "--upgrade", "--no-binary", ":all:"]  # base command
-                    cmd.extend(self.python_packages)  # the python packages to install
-                    _process_run(cmd)
-                if self.requirement_paths:
-                    # install dependencies from requirement files
-                    cmd = [pip_cmd, "install", "--upgrade", "--no-binary", ":all:"]  # base command
-                    for reqspath in self.requirement_paths:
-                        cmd.append(f"--requirement={reqspath}")  # the dependencies file(s)
-                    _process_run(cmd)
-                if self.charmlib_deps:
-                    # install charmlibs python dependencies
-                    cmd = [pip_cmd, "install", "--upgrade", "--no-binary", ":all:"]  # base command
-                    cmd.extend(self.charmlib_deps)  # the python packages to install
-                _process_run(cmd)
+            if self.requirement_paths or self.charmlib_deps:
+                print(
+                    "Installing packages from requirements files and charm lib dependencies."
+                )
+                requirements_packages = get_requirements_file_package_names(
+                    *self.requirement_paths
+                )
+                new_libs_deps = exclude_packages(
+                    set(self.charmlib_deps), excluded=requirements_packages
+                )
+                _process_run(
+                    [
+                        pip_cmd,
+                        "install",
+                        "--no-binary=:all:",
+                        *(f"--requirement={path}" for path in self.requirement_paths),
+                        *new_libs_deps,
+                    ]
+                )
 
     def _install_strict_dependencies(self, pip_cmd: str) -> None:
         if not self.requirement_paths:
@@ -297,11 +319,13 @@ class CharmBuilder:
         )
         _process_run(
             get_pip_command(
-                [pip_cmd, "install"],
+                [pip_cmd, "install", "--no-deps"],
                 self.requirement_paths,
                 binary_deps=self.binary_python_packages or [],
             )
         )
+        # Validate that the environment is consistent.
+        _process_run([pip_cmd, "check"])
 
     def handle_dependencies(self):
         """Handle from-directory and virtualenv dependencies."""
@@ -363,7 +387,11 @@ def _find_venv_bin(basedir: pathlib.Path, exec_base: str) -> pathlib.Path:
 def _find_venv_site_packages(basedir):
     """Determine the venv site-packages directory in different platforms."""
     output = subprocess.check_output(
-        ["python3", "-c", "import sys; v=sys.version_info; print(f'{v.major} {v.minor}')"],
+        [
+            "python3",
+            "-c",
+            "import sys; v=sys.version_info; print(f'{v.major} {v.minor}')",
+        ],
         text=True,
     )
     major, minor = output.strip().split(" ")
@@ -397,7 +425,9 @@ def _process_run(cmd: list[str]) -> None:
     retcode = proc.wait()
 
     if retcode:
-        raise RuntimeError(f"Subprocess command {cmd} execution failed with retcode {retcode}")
+        raise RuntimeError(
+            f"Subprocess command {cmd} execution failed with retcode {retcode}"
+        )
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -467,4 +497,4 @@ def main():
 if __name__ == "__main__":
     with instrum.Timer("Full charm_builder.py main"):
         main()
-    instrum.dump(get_charm_builder_metrics_path())
+    instrum.dump(get_charm_builder_metrics_path().as_posix())

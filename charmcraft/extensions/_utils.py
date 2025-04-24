@@ -41,7 +41,9 @@ def apply_extensions(project_root: Path, yaml_data: dict[str, Any]) -> dict[str,
     # Process extensions in a consistent order
     for extension_name in sorted(declared_extensions):
         extension_class = get_extension_class(extension_name)
-        extension = extension_class(project_root=project_root, yaml_data=copy.deepcopy(yaml_data))
+        extension = extension_class(
+            project_root=project_root, yaml_data=copy.deepcopy(yaml_data)
+        )
         extension.validate(extension_name=extension_name)
         _apply_extension(yaml_data, extension)
     return yaml_data
@@ -55,7 +57,7 @@ def _apply_extension(
     root_extension = extension.get_root_snippet()
     for property_name, property_value in root_extension.items():
         yaml_data[property_name] = _apply_extension_property(
-            yaml_data.get(property_name), property_value
+            cast(dict, yaml_data.get(property_name)), property_value
         )
 
     # Next, apply the part-specific components
@@ -94,7 +96,7 @@ def _apply_extension_property(
         if isinstance(existing_property, dict) and isinstance(extension_property, dict):
             for key, value in extension_property.items():
                 existing_property[key] = _apply_extension_property(
-                    existing_property.get(key), value
+                    cast(dict, existing_property.get(key)), value
                 )
             return existing_property
         return existing_property

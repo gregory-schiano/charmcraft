@@ -14,14 +14,12 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 
-from textwrap import dedent
 from typing import Any
 
 import pytest
 from overrides import override
 
 from charmcraft import const, errors, extensions
-from charmcraft.config import load
 from charmcraft.extensions.extension import Extension
 
 
@@ -100,7 +98,7 @@ class FullExtension(FakeExtension):
         return {"full-extension/new-part": {"plugin": "nil", "source": None}}
 
 
-@pytest.fixture()
+@pytest.fixture
 def fake_extensions(stub_extensions):
     extensions.register(FakeExtension.name, FakeExtension)
     extensions.register(ExperimentalExtension.name, ExperimentalExtension)
@@ -130,8 +128,12 @@ def test_experimental_no_env(fake_extensions, tmp_path):
         "description": "test description",
         "bases": [
             {
-                "build-on": [{"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}],
-                "run-on": [{"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}],
+                "build-on": [
+                    {"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}
+                ],
+                "run-on": [
+                    {"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}
+                ],
             }
         ],
         "extensions": [ExperimentalExtension.name],
@@ -151,8 +153,12 @@ def test_wrong_base(fake_extensions, tmp_path):
         "description": "test description",
         "bases": [
             {
-                "build-on": [{"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}],
-                "run-on": [{"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}],
+                "build-on": [
+                    {"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}
+                ],
+                "run-on": [
+                    {"name": "ubuntu", "channel": "20.04", "architectures": ["amd64"]}
+                ],
             }
         ],
         "extensions": [FakeExtension.name],
@@ -190,7 +196,13 @@ def test_apply_extensions(fake_extensions, tmp_path):
         "description": "test description",
         "bases": [{"name": "ubuntu", "channel": "22.04"}],
         "extensions": [FullExtension.name],
-        "parts": {"my-part": {"plugin": "nil", "source": None, "stage-packages": ["old-package"]}},
+        "parts": {
+            "my-part": {
+                "plugin": "nil",
+                "source": None,
+                "stage-packages": ["old-package"],
+            }
+        },
     }
 
     applied = extensions.apply_extensions(tmp_path, charmcraft_config)
@@ -204,90 +216,3 @@ def test_apply_extensions(fake_extensions, tmp_path):
 
     # New part
     assert parts[f"{FullExtension.name}/new-part"] == {"plugin": "nil", "source": None}
-
-
-@pytest.mark.parametrize(
-    ("charmcraft_yaml"),
-    [
-        dedent(
-            f"""\
-            type: charm
-            name: test-charm-name-from-charmcraft-yaml
-            summary: test summary
-            description: test description
-            bases:
-              - name: ubuntu
-                channel: "22.04"
-            extensions:
-              - {FullExtension.name}
-            parts:
-              foo:
-                plugin: nil
-                stage-packages:
-                  - old-package
-            """
-        ),
-    ],
-)
-def test_load_charmcraft_yaml_with_extensions(
-    tmp_path,
-    prepare_charmcraft_yaml,
-    charmcraft_yaml,
-    fake_extensions,
-):
-    """Load the config using charmcraft.yaml with extensions."""
-    prepare_charmcraft_yaml(charmcraft_yaml)
-
-    config = load(tmp_path)
-    assert config.type == "charm"
-    assert config.project.dirpath == tmp_path
-    assert config.parts["foo"]["stage-packages"] == [
-        "new-package-1",
-        "old-package",
-    ]
-
-    # New part
-    assert config.parts[f"{FullExtension.name}/new-part"] == {"plugin": "nil", "source": None}
-    assert config.terms == ["https://example.com/terms", "https://example.com/terms2"]
-
-
-@pytest.mark.parametrize(
-    ("charmcraft_yaml"),
-    [
-        dedent(
-            f"""\
-            type: charm
-            name: test-charm-name-from-charmcraft-yaml
-            summary: test summary
-            description: test description
-            bases:
-              - name: ubuntu
-                channel: "20.04"
-              - name: ubuntu
-                channel: "22.04"
-            extensions:
-              - {FullExtension.name}
-            parts:
-              foo:
-                plugin: nil
-                stage-packages:
-                  - old-package
-            """
-        ),
-    ],
-)
-def test_load_charmcraft_yaml_with_extensions_unsupported_base(
-    tmp_path,
-    prepare_charmcraft_yaml,
-    charmcraft_yaml,
-    fake_extensions,
-):
-    """Load the config using charmcraft.yaml with extensions."""
-    prepare_charmcraft_yaml(charmcraft_yaml)
-
-    with pytest.raises(errors.ExtensionError) as exc:
-        load(tmp_path)
-
-    assert str(exc.value) == (
-        "Extension 'full-extension' does not support base: ('ubuntu', '20.04')"
-    )

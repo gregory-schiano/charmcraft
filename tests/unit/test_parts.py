@@ -14,20 +14,12 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 
+import pydantic
 import pytest
 from pyfakefs.fake_filesystem import FakeFilesystem
 
 from charmcraft import parts
 
-FULLY_DEFINED_STRICT_CHARM = {
-    "source": ".",
-    "plugin": "charm",
-    "charm-strict-dependencies": True,
-    "charm-binary-python-packages": [],
-    "charm-python-packages": [],
-    "charm-requirements": [],
-    "charm-entrypoint": "src/charm.py",
-}
 MINIMAL_STRICT_CHARM = {
     "source": ".",
     "plugin": "charm",
@@ -38,24 +30,32 @@ MINIMAL_STRICT_CHARM = {
 @pytest.mark.parametrize(
     ("part_config", "expected"),
     [
-        ({}, {"charm-requirements": ["requirements.txt"]}),
+        ({}, {}),
         (
             {"charm-requirements": ["requirements.txt"]},
             {"charm-requirements": ["requirements.txt"]},
         ),
         (
-            {"charm-requirements": ["requirements.txt"], "charm-binary-python-packages": ["ops"]},
-            {"charm-requirements": ["requirements.txt"], "charm-binary-python-packages": ["ops"]},
+            {
+                "charm-requirements": ["requirements.txt"],
+                "charm-binary-python-packages": ["ops"],
+            },
+            {
+                "charm-requirements": ["requirements.txt"],
+                "charm-binary-python-packages": ["ops"],
+            },
         ),
     ],
 )
-def test_partconfig_strict_dependencies_success(fs: FakeFilesystem, part_config, expected):
+def test_partconfig_strict_dependencies_success(
+    fs: FakeFilesystem, part_config, expected
+):
     """Test various success scenarios for a charm part with strict dependencies."""
     for file in part_config.get("charm-requirements", ["requirements.txt"]):
         fs.create_file(file, contents="ops~=2.5")
 
     part_config.update(MINIMAL_STRICT_CHARM)
-    real_expected = FULLY_DEFINED_STRICT_CHARM.copy()
+    real_expected = MINIMAL_STRICT_CHARM.copy()
     real_expected.update(expected)
 
     actual = parts.process_part_config(part_config)
@@ -68,29 +68,24 @@ def test_partconfig_strict_dependencies_success(fs: FakeFilesystem, part_config,
     [
         (
             {"charm-requirements": ["req.txt"], "charm-python-packages": ["ops"]},
-            "'charm-python-packages' must not be set if 'charm-strict-dependencies' is enabled",
+            "Value error, 'charm-python-packages' must not be set if 'charm-strict-dependencies' is enabled",
         ),
         (
-            {"charm-requirements": ["req.txt"], "charm-binary-python-packages": ["not-here"]},
-            "All dependencies must be specified in requirements files for strict dependencies.",
+            {},
+            "Value error, 'charm-strict-dependencies' requires at least one requirements file.",
         ),
-        (
-            {"charm-requirements": ["req.txt"], "charm-binary-python-packages": ["ops>=2.6"]},
-            "'charm-binary-python-packages' may contain only package names allowed to be "
-            "installed from binary if 'charm-strict-dependencies' is enabled. Invalid "
-            "package names: ['ops>=2.6']",
-        ),
-        ({}, "'charm-strict-dependencies' requires at least one requirements file."),
     ],
 )
-def test_partconfig_strict_dependencies_failure(fs: FakeFilesystem, part_config, message):
+def test_partconfig_strict_dependencies_failure(
+    fs: FakeFilesystem, part_config, message
+):
     """Test failure scenarios for a charm part with strict dependencies."""
     for file in part_config.get("charm-requirements", []):
         fs.create_file(file, contents="ops==2.5.1\n")
 
     part_config.update(MINIMAL_STRICT_CHARM)
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(pydantic.ValidationError) as exc_info:
         parts.process_part_config(part_config)
 
     assert message in {e["msg"] for e in exc_info.value.errors()}

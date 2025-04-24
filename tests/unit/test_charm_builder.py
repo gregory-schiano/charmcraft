@@ -1,4 +1,4 @@
-# Copyright 2023 Canonical Ltd.
+# Copyright 2023-2024 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Unit tests for CharmBuilder."""
+
 import pathlib
 
 import pytest
@@ -30,7 +31,7 @@ pytestmark = [
 REQUIREMENTS_FILES = [pytest.param("", id="empty"), "ops~=2.5", "requests\nops"]
 
 
-@pytest.fixture()
+@pytest.fixture
 def builder(fs: FakeFilesystem) -> charm_builder.CharmBuilder:
     fs.cwd = "/root"
     fs.makedirs(const.BUILD_DIRNAME)
@@ -77,7 +78,9 @@ def test_install_strict_dependencies_pip_failure(
     fs, fake_process: FakeProcess, builder, requirements
 ):
     fs.create_file("requirements.txt", contents=requirements)
-    no_binary_packages = utils.get_package_names(requirements.splitlines(keepends=False))
+    no_binary_packages = utils.get_package_names(
+        requirements.splitlines(keepends=False)
+    )
     no_binary_packages_str = ",".join(sorted(no_binary_packages))
     fake_process.register(
         [
@@ -98,16 +101,17 @@ def test_install_strict_dependencies_success(
     fs: FakeFilesystem, fake_process: FakeProcess, builder, requirements
 ):
     fs.create_file("requirements.txt", contents=requirements)
-    no_binary_packages = utils.get_package_names(requirements.splitlines(keepends=False))
-    no_binary_packages_str = ",".join(sorted(no_binary_packages))
-    fake_process.register(
-        [
-            "/pip",
-            "install",
-            *([f"--no-binary={no_binary_packages_str}"] if no_binary_packages else []),
-            "--requirement=requirements.txt",
-        ],
-        returncode=0,
-    )
+    expected_command = [
+        "/pip",
+        "install",
+        "--no-deps",
+        "--no-binary=:all:",
+        "--requirement=requirements.txt",
+    ]
+    install_cmd = fake_process.register(expected_command, returncode=0)
+    check_cmd = fake_process.register(["/pip", "check"], returncode=0)
 
     builder._install_strict_dependencies("/pip")
+
+    assert install_cmd.call_count() == 1
+    assert check_cmd.call_count() == 1

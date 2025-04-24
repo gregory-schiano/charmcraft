@@ -13,6 +13,7 @@ https://juju.is/docs/sdk/create-a-minimal-kubernetes-charm
 """
 
 import logging
+from typing import cast
 
 import ops
 
@@ -57,27 +58,27 @@ class {{ class_name }}(ops.CharmBase):
         Learn more about config at https://juju.is/docs/sdk/config
         """
         # Fetch the new config value
-        log_level = self.model.config["log-level"].lower()
+        log_level = cast(str, self.model.config["log-level"]).lower()
 
         # Do some validation of the configuration option
         if log_level in VALID_LOG_LEVELS:
             # The config is good, so update the configuration of the workload
             container = self.unit.get_container("httpbin")
-            # Verify that we can connect to the Pebble API in the workload container
-            if container.can_connect():
-                # Push an updated layer with the new config
+            # Push an updated layer with the new config
+            try:
                 container.add_layer("httpbin", self._pebble_layer, combine=True)
                 container.replan()
-
-                logger.debug("Log level for gunicorn changed to '%s'", log_level)
-                self.unit.status = ops.ActiveStatus()
-            else:
+            except ops.pebble.ConnectionError:
                 # We were unable to connect to the Pebble API, so we defer this event
+                self.unit.status = ops.MaintenanceStatus("waiting for Pebble API")
                 event.defer()
-                self.unit.status = ops.WaitingStatus("waiting for Pebble API")
+                return
+
+            logger.debug("Log level for gunicorn changed to '%s'", log_level)
+            self.unit.status = ops.ActiveStatus()
         else:
             # In this case, the config option is bad, so block the charm and notify the operator.
-            self.unit.status = ops.BlockedStatus("invalid log level: '{log_level}'")
+            self.unit.status = ops.BlockedStatus(f"invalid log level: '{log_level}'")
 
     @property
     def _pebble_layer(self) -> ops.pebble.LayerDict:
@@ -100,4 +101,4 @@ class {{ class_name }}(ops.CharmBase):
 
 
 if __name__ == "__main__":  # pragma: nocover
-    ops.main({{ class_name }})  # type: ignore
+    ops.main({{ class_name }})

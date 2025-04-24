@@ -1,4 +1,4 @@
-# Copyright 2023-2024 Canonical Ltd.
+# Copyright 2023-2025 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,29 +14,40 @@
 #
 # For further info, check https://github.com/canonical/charmcraft
 """Tests for package service."""
+
 import datetime
+import pathlib
 import sys
 import zipfile
+from typing import Any
 
 import craft_cli.pytest_plugin
 import pytest
 import pytest_check
+from craft_application import util
+from craft_application.models import BuildInfo
+from craft_providers.bases import BaseName
 
-from charmcraft import const, models, services, utils
+from charmcraft import const, models, services
 from charmcraft.application.main import APP_METADATA
+from charmcraft.models.project import BasesCharm
 
-SIMPLE_BUILD_BASE = models.charmcraft.Base(name="ubuntu", channel="22.04", architectures=["arm64"])
+SIMPLE_BUILD_BASE = models.charmcraft.Base(
+    name="ubuntu", channel="22.04", architectures=["arm64"]
+)
 SIMPLE_MANIFEST = models.Manifest(
     charmcraft_started_at="1970-01-01T00:00:00+00:00",
-    bases=[models.Base(name="ubuntu", channel="22.04", architectures=["arm64"])],
+    bases=[SIMPLE_BUILD_BASE],
 )
-MANIFEST_WITH_ATTRIBUTE = models.Manifest(
-    **SIMPLE_MANIFEST.marshal(),
-    analysis={"attributes": [models.Attribute(name="boop", result="success")]},
+MANIFEST_WITH_ATTRIBUTE = models.Manifest.model_validate(
+    SIMPLE_MANIFEST.marshal()
+    | {
+        "analysis": {"attributes": [models.Attribute(name="boop", result="success")]},
+    }
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def package_service(fake_path, simple_charm, service_factory, default_build_plan):
     fake_project_dir = fake_path / "project"
     fake_project_dir.mkdir(parents=True)
@@ -68,23 +79,46 @@ def package_service(fake_path, simple_charm, service_factory, default_build_plan
         ),
     ],
 )
-def test_get_metadata(package_service, simple_charm, metadata):
+def test_get_metadata(package_service, simple_charm: BasesCharm, metadata):
     package_service._project = simple_charm
 
     assert package_service.metadata == metadata
 
 
 @pytest.mark.parametrize(
-    ("bases", "expected_name"),
+    ("build_plan", "expected_name"),
     [
-        (
-            [SIMPLE_BUILD_BASE],
+        pytest.param(
+            [
+                BuildInfo(
+                    platform="distro-1-test64",
+                    build_on="riscv64",
+                    build_for="riscv64",
+                    base=BaseName("ubuntu", "24.04"),
+                )
+            ],
             "charmy-mccharmface_distro-1-test64.charm",
+            id="simple",
+        ),
+        pytest.param(
+            [
+                BuildInfo(
+                    platform="ubuntu@24.04:riscv64",
+                    build_on="riscv64",
+                    build_for="riscv64",
+                    base=BaseName("ubuntu", "24.04"),
+                )
+            ],
+            "charmy-mccharmface_ubuntu@24.04-riscv64.charm",
+            id="multi-base",
         ),
     ],
 )
-def test_get_charm_path(fake_path, package_service, bases, expected_name):
+def test_get_charm_path(fake_path, package_service, build_plan, expected_name):
     fake_prime_dir = fake_path / "prime"
+    package_service._build_plan = build_plan
+    package_service._platform = build_plan[0].platform
+
     charm_path = package_service.get_charm_path(fake_prime_dir)
 
     assert charm_path == fake_prime_dir / expected_name
@@ -94,7 +128,10 @@ def test_get_charm_path(fake_path, package_service, bases, expected_name):
     ("lint", "expected"),
     [
         ([], SIMPLE_MANIFEST),
-        ([models.CheckResult("lint", "lint", "lint", models.CheckType.LINT, "")], SIMPLE_MANIFEST),
+        (
+            [models.CheckResult("lint", "lint", "lint", models.CheckType.LINT, "")],
+            SIMPLE_MANIFEST,
+        ),
         (
             [models.CheckResult("boop", "success", "", models.CheckType.ATTRIBUTE, "")],
             MANIFEST_WITH_ATTRIBUTE,
@@ -102,116 +139,310 @@ def test_get_charm_path(fake_path, package_service, bases, expected_name):
     ],
 )
 def test_get_manifest(package_service, simple_charm, lint, expected):
-    simple_charm._started_at = datetime.datetime(1970, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    simple_charm._started_at = datetime.datetime(
+        1970, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc
+    )
 
     assert package_service.get_manifest(lint) == expected
 
 
 def test_do_not_overwrite_metadata_yaml(
-    emitter: craft_cli.pytest_plugin.RecordingEmitter, fake_path, package_service, simple_charm
+    emitter: craft_cli.pytest_plugin.RecordingEmitter,
+    fake_path,
+    package_service,
+    simple_charm,
 ):
     fake_prime_dir = fake_path / "prime"
     fake_prime_dir.mkdir()
     fake_stage_dir = fake_path / "stage"
     fake_stage_dir.mkdir()
-    fake_staged_metadata = fake_stage_dir / "metadata.yaml"
+    fake_staged_metadata = fake_stage_dir / const.METADATA_FILENAME
     fake_staged_metadata.touch()
     package_service._project.parts["reactive"] = {"source": "."}
 
     package_service.write_metadata(fake_prime_dir)
 
     emitter.assert_debug(
-        "'metadata.yaml' generated by charm, not using original project metadata."
+        "'metadata.yaml' generated by charm. Not using original project metadata."
     )
+
+
+def test_do_not_overwrite_actions_yaml(
+    emitter: craft_cli.pytest_plugin.RecordingEmitter,
+    fake_path,
+    package_service,
+    simple_charm,
+):
+    fake_prime_dir = fake_path / "prime"
+    fake_prime_dir.mkdir()
+    fake_stage_dir = fake_path / "stage"
+    fake_stage_dir.mkdir()
+    fake_staged_actions = fake_stage_dir / const.JUJU_ACTIONS_FILENAME
+    fake_staged_actions.touch()
+    package_service._project.parts["reactive"] = {"source": "."}
+
+    package_service.write_metadata(fake_prime_dir)
+
+    emitter.assert_debug("'actions.yaml' generated by charm. Skipping generation.")
 
 
 # region Tests for getting bases for manifest.yaml
 @pytest.mark.parametrize(
-    ("bases", "expected"),
+    ("bases", "build_item", "expected"),
     [
         (
             [{"name": "ubuntu", "channel": "20.04"}],
+            BuildInfo(
+                platform=util.get_host_architecture(),
+                build_for=util.get_host_architecture(),
+                build_on=util.get_host_architecture(),
+                base=BaseName("ubuntu", "20.04"),
+            ),
             [
                 {
                     "name": "ubuntu",
                     "channel": "20.04",
-                    "architectures": [utils.get_host_architecture()],
+                    "architectures": [util.get_host_architecture()],
                 }
             ],
         ),
         (
             [
-                {"name": "ubuntu", "channel": "22.04", "architectures": ["all"]},
-                {"name": "ubuntu", "channel": "20.04", "architectures": ["riscv64"]},
+                {
+                    "build-on": [
+                        {
+                            "name": "ubuntu",
+                            "channel": "22.04",
+                            "architectures": ["riscv64"],
+                        }
+                    ],
+                    "run-on": [
+                        {
+                            "name": "ubuntu",
+                            "channel": "22.04",
+                            "architectures": ["all"],
+                        },
+                    ],
+                },
             ],
+            BuildInfo(
+                platform="riscv64",
+                build_for="riscv64",
+                build_on="riscv64",
+                base=BaseName("ubuntu", "22.04"),
+            ),
             [
                 {"name": "ubuntu", "channel": "22.04", "architectures": ["all"]},
-                {"name": "ubuntu", "channel": "20.04", "architectures": ["riscv64"]},
             ],
+        ),
+        (
+            [{"name": "centos", "channel": "7"}],
+            BuildInfo(
+                platform=util.get_host_architecture(),
+                build_on=util.get_host_architecture(),
+                build_for=util.get_host_architecture(),
+                base=BaseName("centos", "7"),
+            ),
+            [
+                {
+                    "name": "centos",
+                    "channel": "7",
+                    "architectures": [util.get_host_architecture()],
+                }
+            ],
+        ),
+        pytest.param(
+            [
+                {"name": "centos", "channel": "7"},
+                {
+                    "build-on": [{"name": "ubuntu", "channel": "20.04"}],
+                    "run-on": [
+                        {"name": "ubuntu", "channel": "20.04", "architectures": ["all"]}
+                    ],
+                },
+                {
+                    "build-on": [
+                        {
+                            "name": "ubuntu",
+                            "channel": "22.04",
+                            "architectures": ["amd64", "arm64"],
+                        }
+                    ],
+                    "run-on": [
+                        {
+                            "name": "ubuntu",
+                            "channel": "22.04",
+                            "architectures": ["arm64"],
+                        }
+                    ],
+                },
+            ],
+            BuildInfo(
+                platform="amd64",
+                build_on="amd64",
+                build_for="arm64",
+                base=BaseName("ubuntu", "22.04"),
+            ),
+            [{"name": "ubuntu", "channel": "22.04", "architectures": ["arm64"]}],
+            id="cross-compile",
         ),
     ],
 )
-def test_get_manifest_bases_from_bases(fake_path, package_service, bases, expected):
-    charm = models.BasesCharm.parse_obj(
+def test_get_manifest_bases_from_bases(
+    fake_path: pathlib.Path,
+    package_service: services.PackageService,
+    bases: list[dict[str, Any]],
+    build_item: BuildInfo,
+    expected: list[dict[str, Any]],
+):
+    charm = models.BasesCharm.model_validate(
         {
             "name": "my-charm",
             "description": "",
             "summary": "",
             "type": "charm",
-            "bases": [{"build-on": bases, "run-on": bases}],
+            "bases": bases,
         }
     )
     package_service._project = charm
+    package_service._build_plan = [build_item]
 
-    assert package_service.get_manifest_bases() == [models.Base.parse_obj(b) for b in expected]
+    assert package_service.get_manifest_bases() == [
+        models.Base.model_validate(b) for b in expected
+    ]
 
 
-@pytest.mark.parametrize("base", ["ubuntu@22.04", "almalinux@9"])
 @pytest.mark.parametrize(
-    ("platforms", "selected_platform", "expected_architectures"),
+    ("base", "build_base", "platforms", "build_item", "expected"),
     [
-        ({"armhf": None}, "armhf", ["armhf"]),
-        (
-            {"anything": {"build-on": [*const.SUPPORTED_ARCHITECTURES], "build-for": "all"}},
-            "anything",
-            ["all"],
+        pytest.param(
+            "ubuntu@24.04",
+            None,
+            {"test-platform": {"build-on": ["amd64"], "build-for": ["riscv64"]}},
+            BuildInfo(
+                platform="test-platform",
+                build_on="amd64",
+                build_for="riscv64",
+                base=BaseName("not-to-be-used", "100"),
+            ),
+            models.Base(
+                # uses the project base
+                name="ubuntu",
+                channel="24.04",
+                architectures=["riscv64"],
+            ),
+            id="base-from-project",
         ),
-        (
+        pytest.param(
+            "ubuntu@24.04",
+            "ubuntu@devel",
+            {"test-platform": {"build-on": ["amd64"], "build-for": ["riscv64"]}},
+            BuildInfo(
+                platform="test-platform",
+                build_on="amd64",
+                build_for="riscv64",
+                # the BuildInfo will use the build-base, which shouldn't go in the manifest
+                base=BaseName("ubuntu", "devel"),
+            ),
+            models.Base(
+                name="ubuntu",
+                channel="24.04",
+                architectures=["riscv64"],
+            ),
+            id="ignore-build-base",
+        ),
+        pytest.param(
+            None,
+            None,
+            {"ubuntu@24.04:amd64": None},
+            BuildInfo(
+                platform="ubuntu@24.04:amd64",
+                build_on="amd64",
+                build_for="amd64",
+                base=BaseName("ubuntu", "24.04"),
+            ),
+            models.Base(
+                name="ubuntu",
+                channel="24.04",
+                architectures=["amd64"],
+            ),
+            id="multi-base-shorthand",
+        ),
+        pytest.param(
+            None,
+            None,
             {
-                "anything": {"build-on": [*const.SUPPORTED_ARCHITECTURES], "build-for": "all"},
-                "amd64": None,
-                "riscy": {"build-on": ["arm64", "ppc64el", "riscv64"], "build-for": ["all"]},
+                "test-platform": {
+                    "build-on": ["ubuntu@24.04:amd64"],
+                    "build-for": ["ubuntu@24.04:riscv64"],
+                }
             },
-            "anything",
-            ["all"],
+            BuildInfo(
+                platform="test-platform",
+                build_on="amd64",
+                build_for="riscv64",
+                base=BaseName("ubuntu", "24.04"),
+            ),
+            models.Base(
+                name="ubuntu",
+                channel="24.04",
+                architectures=["riscv64"],
+            ),
+            id="multi-base-standard",
         ),
-        ({utils.get_host_architecture(): None}, None, [utils.get_host_architecture()]),
-        ({"invalid-arch": None}, None, [utils.get_host_architecture()]),
     ],
 )
 def test_get_manifest_bases_from_platforms(
-    package_service, base, platforms, selected_platform, expected_architectures
+    package_service, base, build_base, platforms, build_item, expected
 ):
-    charm = models.PlatformCharm.parse_obj(
+    charm = models.PlatformCharm.model_validate(
         {
             "name": "my-charm",
             "description": "",
             "summary": "",
             "type": "charm",
             "base": base,
+            "build-base": build_base,
             "platforms": platforms,
-            "parts": {},
+            "parts": {"my-part": {"plugin": "nil"}},
         }
     )
     package_service._project = charm
-    package_service._platform = selected_platform
+    package_service._build_plan = [build_item]
 
     bases = package_service.get_manifest_bases()
 
     pytest_check.equal(len(bases), 1)
     actual_base = bases[0]
-    pytest_check.equal(f"{actual_base.name}@{actual_base.channel}", base)
-    pytest_check.equal(actual_base.architectures, expected_architectures)
+    pytest_check.equal(expected, actual_base)
+
+
+def test_get_manifest_bases_from_platforms_invalid(package_service):
+    charm = models.PlatformCharm.model_validate(
+        {
+            "name": "my-charm",
+            "description": "",
+            "summary": "",
+            "type": "charm",
+            "base": None,
+            "build-base": None,
+            "platforms": {"amd64": None},
+            "parts": {"my-part": {"plugin": "nil"}},
+        }
+    )
+    package_service._project = charm
+    package_service._build_plan = [
+        BuildInfo(
+            platform="test-platform",
+            build_on="amd64",
+            build_for="riscv64",
+            base=BaseName("ubuntu", "24.04"),
+        )
+    ]
+
+    # this shouldn't happen, but make sure the error is friendly
+    with pytest.raises(TypeError, match=r"Unknown charm type .*, cannot get bases\."):
+        package_service.get_manifest_bases()
 
 
 # endregion
